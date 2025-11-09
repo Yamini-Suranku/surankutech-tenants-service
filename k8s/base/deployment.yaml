@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tenants-service
+  labels:
+    app: tenants-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tenants-service
+  template:
+    metadata:
+      labels:
+        app: tenants-service
+        tier: backend
+    spec:
+      containers:
+      - name: tenants-service
+        image: tenants-service:latest
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: PORT
+          value: "8000"
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: environment
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: database-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: redis-url
+        - name: KEYCLOAK_URL
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: keycloak-url
+        # Cloud-agnostic Object Storage (S3-compatible)
+        - name: STORAGE_TYPE
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: storage-type
+        - name: STORAGE_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: storage-access-key
+        - name: STORAGE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: storage-secret-key
+        - name: STORAGE_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: storage-endpoint
+        - name: STORAGE_BUCKET_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: storage-bucket-name
+        - name: STORAGE_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: storage-region
+        - name: STORAGE_USE_SSL
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: storage-use-ssl
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000

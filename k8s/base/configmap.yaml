@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenants-config
+data:
+  environment: "development"
+  keycloak-url: "http://keycloak.auth.svc.cluster.local:8080"
+  # Cloud-agnostic Storage Configuration (S3-compatible)
+  storage-type: "s3"  # s3, gcs, azure, minio
+  storage-endpoint: ""  # Leave empty for AWS S3, set for other providers
+  storage-bucket-name: "suranku-tenants-data"
+  storage-region: "us-east-1"
+  storage-use-ssl: "true"
+  log-level: "INFO"

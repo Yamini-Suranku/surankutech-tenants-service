@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenants-config
+data:
+  environment: "development"
+  # AWS Configuration
+  storage-type: "s3"
+  storage-endpoint: ""  # Empty for AWS S3
+  storage-bucket-name: "suranku-dev-tenants-data"
+  storage-region: "us-east-1"
+  storage-use-ssl: "true"
