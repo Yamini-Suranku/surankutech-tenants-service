@@ -13,10 +13,10 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from pydantic import BaseModel
 
-from services.shared.database import get_db
-from services.shared.auth import verify_token, TokenData, get_current_token_data
-from services.shared.models import Tenant, User, UserTenant, AuditLog
-from services.tenants.schemas import TenantResponse
+from shared.database import get_db
+from shared.auth import verify_token, TokenData, get_current_token_data
+from shared.models import Tenant, User, UserTenant, AuditLog
+from schemas import TenantResponse
 import os
 
 logger = logging.getLogger(__name__)

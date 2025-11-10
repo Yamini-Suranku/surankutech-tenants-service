@@ -6,9 +6,9 @@ Handles sending password reset emails to users
 import logging
 from typing import Dict
 from sqlalchemy.orm import Session
-from services.shared.models import User
-from services.shared.email_service import BaseEmailService
-from services.tenants.models import PasswordResetToken
+from shared.models import User
+from shared.email_service import BaseEmailService
+from models import PasswordResetToken
 
 logger = logging.getLogger(__name__)
 

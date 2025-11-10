@@ -5,9 +5,9 @@ from datetime import datetime, timedelta
 import logging
 import uuid
 
-from services.shared.database import get_db
-from services.tenants.models import TenantLDAPConfig, TenantLDAPSyncHistory
-from services.tenants.schemas import (
+from shared.database import get_db
+from models import TenantLDAPConfig, TenantLDAPSyncHistory
+from schemas import (
     LDAPConfigCreateRequest,
     LDAPConfigUpdateRequest,
     LDAPConfigResponse,
@@ -20,9 +20,9 @@ from services.tenants.schemas import (
     LDAPUserPreviewResponse,
     PaginationInfo
 )
-from services.tenants.keycloak_client import KeycloakClient
-from services.shared.auth import get_current_user
-from services.shared.credential_manager import get_credential_manager
+from keycloak_client import KeycloakClient
+from shared.auth import get_current_user
+from shared.credential_manager import get_credential_manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

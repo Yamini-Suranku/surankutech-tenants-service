@@ -172,7 +172,7 @@ def get_user_tenant_id(token_data: TokenData) -> str:
 
 def get_user_tenant_id_from_db(token_data: TokenData, db) -> str:
     """Get tenant ID from database using user's ID - fallback when groups aren't available"""
-    from services.shared.models import User, UserTenant
+    from shared.models import User, UserTenant
 
     # Get user from database
     user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
@@ -242,3 +242,7 @@ def require_model_approval_access(token_data: TokenData, app_client: str) -> boo
             require_app_role(token_data, app_client, "administrator") or
             require_app_role(token_data, app_client, "evaluator") or
             require_app_role(token_data, app_client, "stuart"))
+
+async def get_current_user(token_data: TokenData = Depends(get_current_token_data)):
+    """Get current user information from token data"""
+    return token_data

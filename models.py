@@ -7,9 +7,9 @@ from pathlib import Path
 
 # Add parent directory to path to import shared modules
 sys.path.append(str(Path(__file__).parent.parent))
-from services.shared.database import Base
+from shared.database import Base
 # Import shared models to ensure they're registered with SqlAlchemy metadata
-from services.shared.models import Tenant  # Ensure Tenant model is available for foreign keys
+from shared.models import Tenant  # Ensure Tenant model is available for foreign keys
 
 class Invitation(Base):
     __tablename__ = "invitations"

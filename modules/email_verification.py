@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import logging
 
-from services.shared.database import get_db
+from shared.database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ async def verify_email(
 ):
     """Verify user email address and activate account"""
     try:
-        from services.tenants.email_verification import EmailVerificationService
+        from email_verification import EmailVerificationService
         verification_service = EmailVerificationService()
 
         result = await verification_service.verify_email(db, email, token)
@@ -62,7 +62,7 @@ async def resend_verification_email(
             }
 
         # Send verification email
-        from services.tenants.email_verification import EmailVerificationService
+        from email_verification import EmailVerificationService
         verification_service = EmailVerificationService()
         result = await verification_service.send_verification_email(db, user, resend=True)
 
@@ -82,7 +82,7 @@ async def check_verification_status(
 ):
     """Check email verification status"""
     try:
-        from services.tenants.email_verification import EmailVerificationService
+        from email_verification import EmailVerificationService
         verification_service = EmailVerificationService()
 
         result = await verification_service.check_verification_status(db, email)

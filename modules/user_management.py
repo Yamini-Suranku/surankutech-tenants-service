@@ -10,11 +10,11 @@ import logging
 from datetime import datetime, timedelta
 import uuid
 
-from services.shared.database import get_db
-from services.shared.auth import verify_token, require_tenant_access, TokenData
-from services.shared.models import User, UserTenant, TenantAppAccess, AuditLog
-from services.tenants.models import Invitation, SocialAccount
-from services.tenants.schemas import (
+from shared.database import get_db
+from shared.auth import verify_token, require_tenant_access, TokenData
+from shared.models import User, UserTenant, TenantAppAccess, AuditLog
+from models import Invitation, SocialAccount
+from schemas import (
     UserInviteRequest, InvitationResponse, UserResponse, UserUpdateRequest,
     UserListResponse, PaginationInfo, InvitationAcceptRequest
 )
@@ -229,8 +229,8 @@ async def invite_user(
 
     # Send invitation email
     try:
-        from services.tenants.invitation_email_service import InvitationEmailService
-        from services.shared.models import Tenant
+        from invitation_email_service import InvitationEmailService
+        from shared.models import Tenant
 
         # Get tenant and send email
         tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
@@ -734,8 +734,8 @@ async def resend_invitation(
 
         # Send invitation email
         try:
-            from services.tenants.invitation_email_service import InvitationEmailService
-            from services.shared.models import Tenant
+            from invitation_email_service import InvitationEmailService
+            from shared.models import Tenant
 
             # Get tenant and send email
             tenant = db.query(Tenant).filter(Tenant.id == invitation.tenant_id).first()
@@ -877,8 +877,8 @@ async def bulk_invite_users(
 
                 # Send invitation email
                 try:
-                    from services.tenants.invitation_email_service import InvitationEmailService
-                    from services.shared.models import Tenant
+                    from invitation_email_service import InvitationEmailService
+                    from shared.models import Tenant
 
                     # Get tenant and send email
                     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
@@ -1002,7 +1002,7 @@ async def get_invitation_info(
             }
 
         # Get tenant and inviter information
-        from services.shared.models import Tenant
+        from shared.models import Tenant
         tenant = db.query(Tenant).filter(Tenant.id == invitation.tenant_id).first()
         inviter = db.query(User).filter(User.id == invitation.invited_by).first()
 
@@ -1094,11 +1094,11 @@ async def accept_invitation(
                 }
 
         # User doesn't exist - create new user account
-        from services.tenants.keycloak_client import KeycloakClient
+        from keycloak_client import KeycloakClient
         import uuid
 
         # Create user in database (no password stored here)
-        from services.shared.models import UserStatus
+        from shared.models import UserStatus
 
         new_user = User(
             id=str(uuid.uuid4()),

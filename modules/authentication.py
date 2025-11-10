@@ -11,15 +11,15 @@ from datetime import datetime, timedelta
 import uuid
 from pydantic import BaseModel, EmailStr
 
-from services.shared.database import get_db
-from services.shared.auth import verify_token, TokenData, get_current_token_data
-from services.shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
-from services.tenants.models import TenantSettings, SocialAccount, PasswordResetToken
-from services.tenants.schemas import (
+from shared.database import get_db
+from shared.auth import verify_token, TokenData, get_current_token_data
+from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
+from models import TenantSettings, SocialAccount, PasswordResetToken
+from schemas import (
     LoginRequest, LoginResponse, TenantInfo, UserMeResponse, UserResponse,
     TenantSwitchRequest, SocialLoginRequest, SocialLoginResponse
 )
-from services.tenants.keycloak_client import KeycloakClient
+from keycloak_client import KeycloakClient
 import secrets
 import smtplib
 import os
@@ -60,7 +60,7 @@ async def register_user(
                 raise HTTPException(status_code=400, detail="User with this email already exists")
             else:
                 # User exists but not verified - allow resending verification
-                from services.tenants.email_verification import EmailVerificationService
+                from email_verification import EmailVerificationService
                 verification_service = EmailVerificationService()
                 result = await verification_service.send_verification_email(db, existing_user, resend=True)
                 return {
@@ -149,7 +149,7 @@ async def register_user(
         db.commit()
 
         # Send verification email
-        from services.tenants.email_verification import EmailVerificationService
+        from email_verification import EmailVerificationService
         verification_service = EmailVerificationService()
         verification_result = await verification_service.send_verification_email(db, user)
 

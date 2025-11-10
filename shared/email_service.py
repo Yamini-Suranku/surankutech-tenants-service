@@ -187,7 +187,7 @@ class BaseEmailService(ABC):
 
         try:
             # Import here to avoid circular imports
-            from services.tenants.models import EmailLog
+            from models import EmailLog
 
             # Extract context IDs
             context_ids = context_ids or {}

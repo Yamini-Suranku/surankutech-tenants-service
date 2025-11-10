@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional
 import logging
 from sqlalchemy.orm import Session
-from services.shared.database import get_db
-from services.shared.models import User
-from services.tenants.models import SocialAccount
+from shared.database import get_db
+from shared.models import User
+from models import SocialAccount
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart

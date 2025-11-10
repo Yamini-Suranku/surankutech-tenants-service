@@ -12,9 +12,9 @@ from datetime import datetime
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
-from services.shared.database import get_db
-from services.shared.auth import get_current_token_data, TokenData, require_app_role
-from services.shared.models import User, Tenant
+from shared.database import get_db
+from shared.auth import get_current_token_data, TokenData, require_app_role
+from shared.models import User, Tenant
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

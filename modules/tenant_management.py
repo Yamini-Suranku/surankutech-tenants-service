@@ -10,15 +10,15 @@ import logging
 from datetime import datetime, timedelta
 import uuid
 
-from services.shared.database import get_db
-from services.shared.auth import verify_token, require_tenant_access, TokenData
-from services.shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog
-from services.tenants.models import TenantSettings
-from services.tenants.schemas import (
+from shared.database import get_db
+from shared.auth import verify_token, require_tenant_access, TokenData
+from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog
+from models import TenantSettings
+from schemas import (
     TenantCreateRequest, TenantResponse, UserResponse,
     TenantUpdateRequest, AppAccessResponse
 )
-from services.tenants.keycloak_client import KeycloakClient
+from keycloak_client import KeycloakClient
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ async def create_tenant(
             user.keycloak_id = keycloak_user_id
 
             # Send verification email for new user
-            from services.tenants.email_verification import EmailVerificationService
+            from email_verification import EmailVerificationService
             verification_service = EmailVerificationService()
             try:
                 await verification_service.send_verification_email(db, user)

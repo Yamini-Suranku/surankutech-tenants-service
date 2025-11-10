@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional
 import logging
 from sqlalchemy.orm import Session
-from services.shared.database import get_db
-from services.shared.models import User, UserStatus
-from services.shared.email_service import BaseEmailService
+from shared.database import get_db
+from shared.models import User, UserStatus
+from shared.email_service import BaseEmailService
 
 logger = logging.getLogger(__name__)
 
@@ -183,12 +183,12 @@ class EmailVerificationService(BaseEmailService):
             user.email_verification_expires_at = None
 
             # Get user-tenant relationship to check for roles
-            from services.shared.models import UserTenant, TenantAppAccess
+            from shared.models import UserTenant, TenantAppAccess
             user_tenant = db.query(UserTenant).filter(UserTenant.user_id == user.id).first()
 
             # Also activate the user in Keycloak if they have a keycloak_id
             if user.keycloak_id:
-                from services.tenants.keycloak_client import KeycloakClient
+                from keycloak_client import KeycloakClient
                 keycloak_client = KeycloakClient()
 
                 # Get app_roles from user_tenant if available (for tenant registration with admin roles)
@@ -546,7 +546,7 @@ class EmailVerificationService(BaseEmailService):
             token: Verification token that was generated
         """
         try:
-            from services.shared.database import get_db
+            from shared.database import get_db
 
             # Get database session
             db = next(get_db())

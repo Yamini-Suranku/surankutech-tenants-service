@@ -345,8 +345,8 @@ class KeycloakClient:
                     # Check if this is due to disabled account (unverified email)
                     if 'Account is not enabled' in error_msg or 'disabled' in error_msg.lower():
                         # Check if user exists in our database to provide better error message
-                        from services.shared.database import get_db
-                        from services.shared.models import User
+                        from shared.database import get_db
+                        from shared.models import User
                         db = next(get_db())
                         try:
                             user = db.query(User).filter(User.email == email).first()

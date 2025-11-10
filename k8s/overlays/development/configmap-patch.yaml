@@ -4,6 +4,7 @@ metadata:
   name: tenants-config
 data:
   environment: "development"
+  keycloak-url: "http://keycloak.shared-services.svc.cluster.local:8080"
   # AWS Configuration
   storage-type: "s3"
   storage-endpoint: ""  # Empty for AWS S3

@@ -9,11 +9,11 @@ import logging
 from datetime import datetime
 import uuid
 
-from services.shared.database import get_db
-from services.shared.models import User
-from services.tenants.models import SocialAccount
-from services.tenants.schemas import SocialLoginRequest, SocialLoginResponse
-from services.tenants.keycloak_client import KeycloakClient
+from shared.database import get_db
+from shared.models import User
+from models import SocialAccount
+from schemas import SocialLoginRequest, SocialLoginResponse
+from keycloak_client import KeycloakClient
 
 logger = logging.getLogger(__name__)
 

@@ -10,16 +10,16 @@ from datetime import datetime
 from prometheus_fastapi_instrumentator import Instrumentator
 
 # Import all module routers
-from services.tenants.modules.tenant_management import router as tenant_router
-from services.tenants.modules.authentication import router as auth_router
-from services.tenants.modules.email_verification import router as email_router
-from services.tenants.modules.user_management import router as user_router
-from services.tenants.modules.user_profile import router as profile_router
-from services.tenants.modules.social_auth import router as social_router
-from services.tenants.modules.file_upload import router as upload_router
-from services.tenants.modules.admin_info import router as admin_router
-from services.tenants.modules.operator_integration import router as operator_router
-from services.tenants.modules.ldap_management import router as ldap_router
+from modules.tenant_management import router as tenant_router
+from modules.authentication import router as auth_router
+from modules.email_verification import router as email_router
+from modules.user_management import router as user_router
+from modules.user_profile import router as profile_router
+from modules.social_auth import router as social_router
+from modules.file_upload import router as upload_router
+from modules.admin_info import router as admin_router
+from modules.operator_integration import router as operator_router
+from modules.ldap_management import router as ldap_router
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -82,9 +82,9 @@ app.include_router(ldap_router)             # /tenants/{id}/ldap/* (LDAP/AD sync
 @app.post("/api/tenants/auth/login")
 async def legacy_login_endpoint(request: dict):
     """Legacy login endpoint - redirects to main auth login"""
-    from services.tenants.modules.authentication import login_user
-    from services.tenants.schemas import LoginRequest
-    from services.shared.database import get_db
+    from modules.authentication import login_user
+    from schemas import LoginRequest
+    from shared.database import get_db
 
     # Convert dict to LoginRequest
     login_request = LoginRequest(**request)

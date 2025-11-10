@@ -11,10 +11,10 @@ import logging
 from typing import Optional
 import hashlib
 
-from services.shared.database import get_db
-from services.shared.auth import verify_token, TokenData
-from services.shared.models import User
-from services.tenants.keycloak_client import KeycloakClient
+from shared.database import get_db
+from shared.auth import verify_token, TokenData
+from shared.models import User
+from keycloak_client import KeycloakClient
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ async def get_user_profile(
         raise HTTPException(status_code=404, detail="User not found")
 
     # Get app_roles from UserTenant relationship
-    from services.shared.models import UserTenant
+    from shared.models import UserTenant
     user_tenant = db.query(UserTenant).filter(
         UserTenant.user_id == user.id
     ).first()
@@ -118,7 +118,7 @@ async def update_user_profile(
     db.refresh(user)
 
     # Get app_roles from UserTenant relationship (same as GET endpoint)
-    from services.shared.models import UserTenant
+    from shared.models import UserTenant
     user_tenant = db.query(UserTenant).filter(
         UserTenant.user_id == user.id
     ).first()

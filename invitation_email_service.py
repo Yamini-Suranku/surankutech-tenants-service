@@ -6,9 +6,9 @@ Handles sending invitation emails to new users
 import logging
 from typing import Dict
 from sqlalchemy.orm import Session
-from services.shared.models import User, Tenant
-from services.shared.email_service import BaseEmailService
-from services.tenants.models import Invitation
+from shared.models import User, Tenant
+from shared.email_service import BaseEmailService
+from models import Invitation
 
 logger = logging.getLogger(__name__)
 

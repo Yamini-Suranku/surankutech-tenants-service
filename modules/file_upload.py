@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session
 import logging
 from datetime import datetime
 
-from services.shared.database import get_db
-from services.shared.auth import TokenData, get_current_token_data
-from services.shared.models import User, Tenant, UserTenant, AuditLog
+from shared.database import get_db
+from shared.auth import TokenData, get_current_token_data
+from shared.models import User, Tenant, UserTenant, AuditLog
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ async def upload_user_avatar(
         file_data = await file.read()
 
         # Upload to MinIO using storage service
-        from services.shared.storage_service import storage_service
+        from shared.storage_service import storage_service
 
         try:
             avatar_url = storage_service.upload_avatar(user_id, file_data, file.filename)
@@ -142,7 +142,7 @@ async def upload_tenant_logo(
         file_data = await file.read()
 
         # Upload to MinIO using storage service
-        from services.shared.storage_service import storage_service
+        from shared.storage_service import storage_service
 
         try:
             logo_url = storage_service.upload_company_logo(tenant_id, file_data, file.filename)
@@ -186,7 +186,7 @@ async def upload_tenant_logo(
 async def storage_health_check():
     """Check MinIO storage health"""
     try:
-        from services.shared.storage_service import storage_service
+        from shared.storage_service import storage_service
         health_status = storage_service.health_check()
         return health_status
     except Exception as e:
