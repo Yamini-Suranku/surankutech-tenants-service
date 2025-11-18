@@ -47,6 +47,13 @@ Update the following files for your environment:
    - `storage-access-key`: Access key for storage
    - `storage-secret-key`: Secret key for storage
 
+3. **Kafka / Provisioning** (`k8s/overlays/{env}/configmap-patch.yaml`):
+   - `kafka-enable`: Set to `true` to emit tenant lifecycle events
+   - `kafka-bootstrap-servers`: Internal bootstrap service (e.g., `kafka.messaging.svc.cluster.local:29092`)
+   - `tenant-events-topic`: Topic consumed by the provisioning worker (default `tenant.events.v1`)
+   - `tenant-provisioning-topic`: Topic for completion/failure events (default `tenant.provisioning.v1`)
+   - `provisioning-worker-enable`: Set to `true` if you run the worker next to the API deployment
+
 ## Local Development
 
 ```bash
@@ -56,6 +63,10 @@ docker-compose up -d
 # Or run locally
 pip install -r requirements.txt
 uvicorn main:app --reload
+
+# Optional: run the provisioning worker
+export PROVISIONING_WORKER_ENABLE=true
+python workers/provisioning_worker.py
 ```
 
 ## CI/CD

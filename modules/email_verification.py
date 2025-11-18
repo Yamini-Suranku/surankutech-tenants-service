@@ -4,6 +4,7 @@ Handles email verification endpoints and functionality
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 import logging
 
@@ -28,12 +29,74 @@ async def verify_email(
         result = await verification_service.verify_email(db, email, token)
 
         if result["status"] == "verified":
-            return {
-                "status": "success",
-                "message": "Email verified successfully! You can now login to your account.",
-                "redirect_url": "/login?verified=true"
-            }
+            # Return HTML success page with option to go to login
+            html_content = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Email Verified Successfully</title>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        min-height: 100vh;
+                        margin: 0;
+                        background-color: #f5f5f5;
+                    }
+                    .container {
+                        text-align: center;
+                        background: white;
+                        padding: 3rem;
+                        border-radius: 10px;
+                        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                        max-width: 500px;
+                    }
+                    .success-icon {
+                        color: #4CAF50;
+                        font-size: 4rem;
+                        margin-bottom: 1rem;
+                    }
+                    h1 {
+                        color: #333;
+                        margin-bottom: 1rem;
+                    }
+                    p {
+                        color: #666;
+                        margin-bottom: 2rem;
+                        line-height: 1.6;
+                    }
+                    .login-btn {
+                        background-color: #007bff;
+                        color: white;
+                        padding: 12px 30px;
+                        border: none;
+                        border-radius: 5px;
+                        font-size: 16px;
+                        cursor: pointer;
+                        text-decoration: none;
+                        display: inline-block;
+                        transition: background-color 0.3s;
+                    }
+                    .login-btn:hover {
+                        background-color: #0056b3;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="success-icon">✓</div>
+                    <h1>Email Verified Successfully!</h1>
+                    <p>Your email address has been verified successfully. You can now login to your account and access all features.</p>
+                    <a href="/login?verified=true" class="login-btn">Go to Login Page</a>
+                </div>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=html_content, status_code=200)
         else:
+            # For error cases, still return JSON for API compatibility
             return {
                 "status": result["status"],
                 "message": result["message"]

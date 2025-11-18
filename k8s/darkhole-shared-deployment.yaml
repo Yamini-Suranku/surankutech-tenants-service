@@ -1,0 +1,158 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: darkhole-service
+  namespace: darkhole
+  labels:
+    app: darkhole-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: darkhole-api
+  namespace: darkhole
+  labels:
+    app: darkhole-api
+    tier: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: darkhole-api
+  template:
+    metadata:
+      labels:
+        app: darkhole-api
+        tier: backend
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "darkhole-role"
+        vault.hashicorp.com/agent-inject-status: "update"
+        vault.hashicorp.com/agent-inject-secret-darkhole-db: "secret/data/apps/darkhole/shared/database"
+        vault.hashicorp.com/agent-inject-template-darkhole-db: |
+          {{- with secret "secret/data/apps/darkhole/shared/database" -}}
+          export DARKHOLE_DB_ADMIN_USERNAME="{{ default .Data.data.username .Data.data.admin_username }}"
+          export DARKHOLE_DB_ADMIN_PASSWORD="{{ default .Data.data.password .Data.data.admin_password }}"
+          export DARKHOLE_DB_USERNAME="{{ .Data.data.username }}"
+          export DARKHOLE_DB_PASSWORD="{{ .Data.data.password }}"
+          export DARKHOLE_DB_HOST="{{ .Data.data.host }}"
+          export DARKHOLE_DB_PORT="{{ .Data.data.port }}"
+          export DARKHOLE_DB_NAME="{{ .Data.data.database }}"
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-redis: "secret/data/shared/redis"
+        vault.hashicorp.com/agent-inject-template-redis: |
+          {{- with secret "secret/data/shared/redis" -}}
+          export REDIS_HOST="{{ .Data.data.host }}"
+          export REDIS_PORT="{{ .Data.data.port }}"
+          export REDIS_PASSWORD="{{ .Data.data.password }}"
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-darkhole-config: "secret/data/apps/darkhole/shared/config"
+        vault.hashicorp.com/agent-inject-template-darkhole-config: |
+          {{- with secret "secret/data/apps/darkhole/shared/config" -}}
+          export KEYCLOAK_CLIENT_ID="{{ .Data.data.keycloak_client_id }}"
+          export KEYCLOAK_CLIENT_SECRET="{{ .Data.data.keycloak_client_secret }}"
+          export OPENAI_API_KEY="{{ .Data.data.openai_api_key }}"
+          export AZURE_OPENAI_API_KEY="{{ .Data.data.azure_openai_api_key }}"
+          export AZURE_OPENAI_ENDPOINT="{{ .Data.data.azure_openai_endpoint }}"
+          export AZURE_OPENAI_API_VERSION="{{ .Data.data.azure_openai_api_version }}"
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-startup-script: "secret/data/apps/darkhole/shared/config"
+        vault.hashicorp.com/agent-inject-template-startup-script: |
+          #!/bin/bash
+          set -euo pipefail
+
+          source /vault/secrets/darkhole-db
+          source /vault/secrets/redis
+          source /vault/secrets/darkhole-config
+
+          export DATABASE_URL="postgresql://${DARKHOLE_DB_USERNAME}:${DARKHOLE_DB_PASSWORD}@${DARKHOLE_DB_HOST}:${DARKHOLE_DB_PORT}/${DARKHOLE_DB_NAME}"
+
+          if [ -n "${REDIS_PASSWORD:-}" ]; then
+            export REDIS_URL="redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0"
+          else
+            export REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}/0"
+          fi
+
+          export KEYCLOAK_CLIENT_ID="${KEYCLOAK_CLIENT_ID}"
+          export KEYCLOAK_CLIENT_SECRET="${KEYCLOAK_CLIENT_SECRET}"
+
+          exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+        vault.hashicorp.com/agent-inject-file-startup-script: "startup.sh"
+        vault.hashicorp.com/agent-inject-perms-startup-script: "0755"
+    spec:
+      serviceAccountName: darkhole-service
+      initContainers:
+      - name: ensure-darkhole-db
+        image: postgres:15
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          source /vault/secrets/darkhole-db
+          export PGPASSWORD="${DARKHOLE_DB_ADMIN_PASSWORD}"
+          HOST="${DARKHOLE_DB_HOST}"
+          USER="${DARKHOLE_DB_ADMIN_USERNAME}"
+          DB_NAME="${DARKHOLE_DB_NAME}"
+          CHECK_CMD="SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'"
+          if psql -h "$HOST" -U "$USER" -tAc "$CHECK_CMD" | grep -q 1; then
+            echo "Database ${DB_NAME} already exists"
+          else
+            echo "Creating database ${DB_NAME}"
+            psql -h "$HOST" -U "$USER" -c "CREATE DATABASE ${DB_NAME};"
+          fi
+          unset PGPASSWORD
+      containers:
+      - name: darkhole-api
+        image: darkhole-service:v0.2
+        imagePullPolicy: IfNotPresent
+        command: ["/vault/secrets/startup.sh"]
+        ports:
+        - containerPort: 8000
+        env:
+        - name: ENVIRONMENT
+          value: "development"
+        - name: KEYCLOAK_URL
+          value: "http://keycloak.shared-services.svc.cluster.local:8080"
+        - name: KEYCLOAK_REALM
+          value: "suranku-platform"
+        - name: TENANT_SERVICE_URL
+          value: "http://tenants-service.tenant-services.svc.cluster.local:80"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: darkhole-api
+  namespace: darkhole
+  labels:
+    app: darkhole-api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: darkhole-api

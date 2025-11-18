@@ -5,9 +5,22 @@ metadata:
 data:
   environment: "development"
   keycloak-url: "http://keycloak.shared-services.svc.cluster.local:8080"
-  # AWS Configuration
-  storage-type: "s3"
-  storage-endpoint: ""  # Empty for AWS S3
-  storage-bucket-name: "suranku-dev-tenants-data"
+  keycloak-client-id: "suranku-api"
+  # Development-specific Application Base URL for email links (via Kong Gateway)
+  app-base-url: "http://api.local.suranku"
+  # Cloud-agnostic Storage Configuration (S3-compatible)
+  storage-type: "minio"  # Use MinIO for development
+  storage-endpoint: "http://suranku-minio.shared-services.svc.cluster.local:9000"  # MinIO endpoint for dev
+  storage-bucket-name: "tenants-data"
   storage-region: "us-east-1"
-  storage-use-ssl: "true"
+  storage-use-ssl: "false"  # No SSL for local development
+  # SMTP Configuration for development
+  smtp-host: "smtp.gmail.com"
+  smtp-port: "587"
+  smtp-use-tls: "true"
+  email-from: "admin@suranku.com"
+  email-from-name: "SurankuTech Development"
+  log-level: "DEBUG"
+  # Enable Kafka and provisioning for development
+  kafka-enable: "true"
+  provisioning-worker-enable: "true"

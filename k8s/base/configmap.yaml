@@ -3,12 +3,27 @@ kind: ConfigMap
 metadata:
   name: tenants-config
 data:
+  # Base configuration - override in environment-specific overlays
   environment: "development"
-  keycloak-url: "http://keycloak.auth.svc.cluster.local:8080"
-  # Cloud-agnostic Storage Configuration (S3-compatible)
-  storage-type: "s3"  # s3, gcs, azure, minio
-  storage-endpoint: ""  # Leave empty for AWS S3, set for other providers
-  storage-bucket-name: "suranku-tenants-data"
+  keycloak-url: "http://keycloak.shared-services.svc.cluster.local:8080"
+  app-base-url: "http://localhost:8000"  # Default fallback
+  # Storage Configuration
+  storage-type: "s3"
+  storage-endpoint: ""
+  storage-bucket-name: "tenants-data"
   storage-region: "us-east-1"
   storage-use-ssl: "true"
+  # SMTP Configuration
+  smtp-host: "smtp.gmail.com"
+  smtp-port: "587"
+  smtp-use-tls: "true"
+  email-from: "admin@example.com"
+  email-from-name: "SurankuTech"
   log-level: "INFO"
+  # Kafka / provisioning
+  kafka-enable: "false"
+  kafka-bootstrap-servers: "kafka.messaging.svc.cluster.local:29092"
+  kafka-client-id: "tenants-service"
+  tenant-events-topic: "tenant.events.v1"
+  tenant-provisioning-topic: "tenant.provisioning.v1"
+  provisioning-worker-enable: "false"

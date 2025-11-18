@@ -20,6 +20,7 @@ from schemas import (
     TenantSwitchRequest, SocialLoginRequest, SocialLoginResponse
 )
 from keycloak_client import KeycloakClient
+from modules.tenant_management import seed_app_access_metadata
 import secrets
 import smtplib
 import os
@@ -29,7 +30,7 @@ from email.mime.multipart import MIMEMultipart
 logger = logging.getLogger(__name__)
 
 # Create router for authentication endpoints
-router = APIRouter(prefix="/auth", tags=["authentication"])
+router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
 class UserRegisterRequest(BaseModel):
     email: str
@@ -130,11 +131,12 @@ async def register_user(
             app_access = TenantAppAccess(
                 tenant_id=tenant_id,
                 app_name=app_name,
-                is_enabled=True,
+                is_enabled=False,  # Changed to False - apps disabled by default
                 user_limit=5,  # Trial limit
                 current_users=0,  # Will be incremented after verification
                 enabled_features=get_trial_features(app_name)
             )
+            seed_app_access_metadata(app_access, tenant, app_name)
             db.add(app_access)
 
         # Create tenant settings
@@ -519,9 +521,20 @@ async def send_password_reset_email(email: str, token: str, first_name: str = No
             logger.warning("SMTP not configured, skipping password reset email")
             return
 
-        # Create reset URL - assuming frontend is accessible
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8000/vanilla")
-        reset_url = f"{frontend_url}/pages/reset-password.html?token={token}"
+        # Create reset URL - using proper ingress
+        frontend_url = os.getenv("FRONTEND_URL")
+        if not frontend_url:
+            # Fallback to derive from APP_BASE_URL or use default proper URL
+            app_base_url = os.getenv("APP_BASE_URL", "http://api.local.suranku")
+            if "api.local.suranku" in app_base_url:
+                frontend_url = app_base_url.replace("api.local.suranku", "id.local.suranku")
+            elif "localhost:8000" in app_base_url:
+                frontend_url = "http://id.local.suranku"
+            else:
+                # For other environments, replace api. with id.
+                frontend_url = app_base_url.replace("api.", "id.")
+
+        reset_url = f"{frontend_url}/reset-password.html?token={token}"
 
         # Create email content
         display_name = first_name or email.split('@')[0]

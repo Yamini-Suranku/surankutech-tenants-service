@@ -7,18 +7,20 @@ from datetime import datetime
 class TenantCreateRequest(BaseModel):
     company_name: str = Field(..., min_length=2, max_length=100)
     admin_email: EmailStr
-    admin_password: str = Field(..., min_length=8, max_length=128)
-    admin_first_name: str = Field(..., min_length=1, max_length=50)
-    admin_last_name: str = Field(..., min_length=1, max_length=50)
+    admin_password: Optional[str] = Field(None, min_length=8, max_length=128)
+    admin_first_name: Optional[str] = Field(None, min_length=1, max_length=50)
+    admin_last_name: Optional[str] = Field(None, min_length=1, max_length=50)
     company_size: Optional[str] = Field(None, max_length=50)
     industry: Optional[str] = Field(None, max_length=100)
     timezone: Optional[str] = Field("UTC", max_length=50)
     currency: Optional[str] = Field("USD", max_length=10)
     language: Optional[str] = Field("en", max_length=10)
+    preferred_domain: Optional[str] = Field(None, max_length=63, description="Preferred tenant subdomain/slug")
 
 class TenantResponse(BaseModel):
     id: str
     name: str
+    domain: Optional[str] = None
     subscription_status: str
     plan_id: str
     trial_expires_at: Optional[datetime] = None
@@ -263,9 +265,69 @@ class AppAccessResponse(BaseModel):
     user_limit: int
     current_users: int
     enabled_features: List[str]
+    ingress_hostname: Optional[str] = None
+    network_tier: Optional[str] = None
+    provisioning_state: Optional[str] = None
+    dns_status: Optional[str] = None
+    provisioning_error: Optional[str] = None
+    last_synced_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+class TenantAppSummary(BaseModel):
+    name: str
+    display_name: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    is_enabled: bool = True
+    status: str = "available"
+    launch_url: Optional[str] = None
+    docs_url: Optional[str] = None
+    enabled_features: List[str] = []
+    ingress_hostname: Optional[str] = None
+    network_tier: Optional[str] = None
+    provisioning_state: Optional[str] = None
+    dns_status: Optional[str] = None
+    provisioning_error: Optional[str] = None
+    last_synced_at: Optional[datetime] = None
+
+class TenantSummaryResponse(BaseModel):
+    id: str
+    name: str
+    domain: Optional[str] = None
+    plan_id: str
+    subscription_status: str
+    trial_expires_at: Optional[datetime] = None
+    logo_url: Optional[str] = None
+    status: str
+    roles: List[str] = []
+    apps: List[TenantAppSummary] = []
+    member_count: int = 0
+    created_at: datetime
+    last_accessed_at: Optional[datetime] = None
+
+class TenantListResponse(BaseModel):
+    tenants: List[TenantSummaryResponse]
+
+class TenantAppToggleRequest(BaseModel):
+    is_enabled: bool
+
+class TenantQuickCreateRequest(BaseModel):
+    company_name: str = Field(..., min_length=2, max_length=100)
+    desired_subdomain: Optional[str] = Field(None, max_length=63)
+    apps: Optional[List[str]] = Field(default_factory=list)
+    industry: Optional[str] = None
+    company_size: Optional[str] = None
+
+class TenantDomainCheckRequest(BaseModel):
+    desired_subdomain: str = Field(..., min_length=3, max_length=63)
+
+class TenantDomainCheckResponse(BaseModel):
+    available: bool
+    sanitized: str
+    suggestions: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
 
 # ===== API KEY SCHEMAS =====
 

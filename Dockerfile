@@ -19,6 +19,11 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Install kubectl for provisioning worker
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl" \
+    && chmod +x kubectl \
+    && mv kubectl /usr/local/bin/
+
 # Create app user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
@@ -34,6 +39,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 # Copy application code
 COPY . .
+
+# Make database startup script executable
+RUN chmod +x db-startup.sh
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/logs /app/tmp \
@@ -52,5 +60,5 @@ EXPOSE ${PORT}
 # Graceful shutdown signal handling for EKS
 STOPSIGNAL SIGTERM
 
-# Run the application with production settings
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1 --access-log --log-level info"]
+# Run the application with database initialization and production settings
+CMD ["./db-startup.sh"]

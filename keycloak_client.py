@@ -17,11 +17,93 @@ class KeycloakClient:
         self.realm = os.getenv("KEYCLOAK_REALM", "suranku-platform")
         self.client_id = os.getenv("KEYCLOAK_CLIENT_ID", "tenants-service")
         self.client_secret = os.getenv("KEYCLOAK_CLIENT_SECRET")
+
+        # Vault secret file path for admin credentials
+        self.vault_secret_file_path = os.getenv("VAULT_ADMIN_SECRET_FILE_PATH")
+
+        # Fallback environment variables if file not available
         self.admin_username = os.getenv("KEYCLOAK_ADMIN_USERNAME", "admin")
         self.admin_password = os.getenv("KEYCLOAK_ADMIN_PASSWORD")
 
         self.token_cache = {}
         self.token_expires_at = None
+
+        # Load client secret from Vault during initialization
+        self._load_client_secret_from_vault()
+
+    def _load_client_secret_from_vault(self):
+        """Load client secret from Vault secret file"""
+        try:
+            if self.vault_secret_file_path and os.path.exists(self.vault_secret_file_path):
+                with open(self.vault_secret_file_path, 'r') as f:
+                    content = f.read().strip()
+
+                # Parse the secret file content (format: KEY=value or export KEY=value)
+                for line in content.split('\n'):
+                    if '=' in line and not line.startswith('#'):
+                        line = line.strip()
+                        # Handle export statements
+                        if line.startswith('export '):
+                            line = line[7:]  # Remove 'export '
+
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"\'')  # Remove quotes
+
+                        if key == 'KEYCLOAK_CLIENT_SECRET':
+                            self.client_secret = value
+                            logger.info("✅ Successfully loaded Keycloak client secret from Vault")
+                            return
+
+        except Exception as e:
+            logger.warning(f"Failed to load client secret from Vault: {e}")
+
+    def _load_admin_credentials(self) -> tuple[str, str]:
+        """Load admin credentials from Vault secret file or environment variables"""
+        try:
+            # Try to load from Vault secret file first
+            if self.vault_secret_file_path and os.path.exists(self.vault_secret_file_path):
+                logger.info(f"Loading admin credentials from Vault secret file: {self.vault_secret_file_path}")
+
+                with open(self.vault_secret_file_path, 'r') as f:
+                    content = f.read().strip()
+
+                # Parse the secret file content (format: KEY=value or export KEY=value)
+                credentials = {}
+                for line in content.split('\n'):
+                    if '=' in line and not line.startswith('#'):
+                        line = line.strip()
+                        # Handle export statements
+                        if line.startswith('export '):
+                            line = line[7:]  # Remove 'export '
+
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip().strip('"\'')  # Remove quotes
+                        credentials[key] = value
+
+                admin_username = credentials.get('KEYCLOAK_ADMIN_USERNAME')
+                admin_password = credentials.get('KEYCLOAK_ADMIN_PASSWORD')
+                client_secret = credentials.get('KEYCLOAK_CLIENT_SECRET')
+
+                # Update client secret if found in Vault
+                if client_secret:
+                    self.client_secret = client_secret
+                    logger.info("Successfully loaded client secret from Vault")
+
+                if admin_username and admin_password:
+                    logger.info(f"Successfully loaded admin credentials from Vault: username={admin_username}")
+                    return admin_username, admin_password
+                else:
+                    logger.warning("Vault secret file missing required credentials, falling back to environment variables")
+
+            # Fallback to environment variables
+            logger.info("Using admin credentials from environment variables")
+            return self.admin_username, self.admin_password
+
+        except Exception as e:
+            logger.warning(f"Failed to load credentials from Vault secret file: {e}, falling back to environment variables")
+            return self.admin_username, self.admin_password
 
     async def get_admin_token(self) -> str:
         """Get admin access token for Keycloak API calls"""
@@ -31,14 +113,17 @@ class KeycloakClient:
                 datetime.now().timestamp() < self.token_expires_at):
                 return self.token_cache["access_token"]
 
+            # Load admin credentials dynamically from Vault or environment
+            admin_username, admin_password = self._load_admin_credentials()
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/realms/master/protocol/openid-connect/token",
                     data={
                         "grant_type": "password",
                         "client_id": "admin-cli",
-                        "username": self.admin_username,
-                        "password": self.admin_password
+                        "username": admin_username,
+                        "password": admin_password
                     }
                 )
 

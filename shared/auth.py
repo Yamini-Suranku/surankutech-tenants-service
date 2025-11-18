@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-KEYCLOAK_URL = "http://keycloak:8080"
+KEYCLOAK_URL = "http://keycloak.shared-services.svc.cluster.local:8080"
 REALM = "suranku-platform"
 
 # Security scheme for JWT tokens
@@ -242,6 +242,38 @@ def require_model_approval_access(token_data: TokenData, app_client: str) -> boo
             require_app_role(token_data, app_client, "administrator") or
             require_app_role(token_data, app_client, "evaluator") or
             require_app_role(token_data, app_client, "stuart"))
+
+def require_platform_admin_access(token_data: TokenData) -> bool:
+    """Check if user has platform administrator access for cross-tenant operations"""
+    logger.info(f"🔍 PLATFORM ADMIN CHECK START for user: {getattr(token_data, 'email', 'unknown')}")
+    logger.info(f"👥 User groups: {getattr(token_data, 'groups', [])}")
+
+    # Check if user belongs to platform administrators group
+    platform_admin_groups = ["platform-admins", "platform-admin", "admin", "superadmin"]
+    user_groups = getattr(token_data, 'groups', [])
+
+    for group in user_groups:
+        if group.lower() in platform_admin_groups:
+            logger.info(f"✅ User has platform admin access via group: {group}")
+            return True
+
+    # Also check if user has admin roles across multiple tenants (indicates platform admin)
+    app_roles = getattr(token_data, 'app_roles', {})
+    all_tenants = getattr(token_data, 'all_tenants', [])
+
+    if len(all_tenants) >= 2:  # If user has access to multiple tenants
+        admin_tenant_count = 0
+        for app_name in ["darkhole", "darkfolio", "confiploy"]:
+            app_tenant_roles = app_roles.get(app_name, [])
+            if any(role in ["admin", "administrator"] for role in app_tenant_roles):
+                admin_tenant_count += 1
+
+        if admin_tenant_count >= 1:  # Has admin role in at least one app
+            logger.info(f"✅ User has platform admin access via multi-tenant admin roles")
+            return True
+
+    logger.warning(f"❌ User {getattr(token_data, 'email', 'unknown')} lacks platform admin access")
+    return False
 
 async def get_current_user(token_data: TokenData = Depends(get_current_token_data)):
     """Get current user information from token data"""

@@ -241,3 +241,158 @@ class VaultCredentialManager:
         except Exception as e:
             logger.error(f"Failed to bulk delete secrets for tenant {tenant_id}: {e}")
             raise
+
+    # Organization-specific secret management methods
+    async def create_organization_secrets(self, org_id: str, org_name: str, admin_email: str, domain: str) -> Dict[str, str]:
+        """Create all secrets required for a new organization"""
+        try:
+            results = {}
+
+            # 1. Keycloak realm admin secrets
+            realm_admin_path = await self.store_secret(
+                org_id, "keycloak", "admin",
+                {
+                    "username": "admin",
+                    "password": self._generate_password(24),
+                    "realm_name": f"org-{org_id}"
+                },
+                {"type": "keycloak_admin", "realm": f"org-{org_id}"}
+            )
+            results["realm_admin"] = realm_admin_path
+
+            # 2. Organization database schema secrets
+            db_user = f"org_{org_id}_user"
+            db_schema = f"org_{org_id}"
+            db_secrets_path = await self.store_secret(
+                org_id, "database", "connection",
+                {
+                    "schema_name": db_schema,
+                    "username": db_user,
+                    "password": self._generate_password(32),
+                    "host": "suranku-postgres.shared-services.svc.cluster.local",
+                    "port": "5432"
+                },
+                {"type": "database_connection", "schema": db_schema}
+            )
+            results["database"] = db_secrets_path
+
+            # 3. Organization configuration
+            config_path = await self.store_secret(
+                org_id, "config", "organization",
+                {
+                    "org_id": org_id,
+                    "org_name": org_name,
+                    "domain": domain,
+                    "admin_email": admin_email,
+                    "status": "active",
+                    "plan": "free",
+                    "enabled_apps": []
+                },
+                {"type": "org_config", "created_by": admin_email}
+            )
+            results["config"] = config_path
+
+            # 4. SMTP integration secrets
+            smtp_path = await self.store_secret(
+                org_id, "integrations", "smtp",
+                {
+                    "smtp_host": "smtp.suranku.com",
+                    "smtp_port": "587",
+                    "smtp_username": f"noreply@{domain}",
+                    "smtp_password": self._generate_password(24),
+                    "from_email": f"noreply@{domain}",
+                    "reply_to": f"support@{domain}"
+                },
+                {"type": "smtp_config", "domain": domain}
+            )
+            results["smtp"] = smtp_path
+
+            logger.info(f"Created organization secrets for org_id: {org_id}")
+            return results
+
+        except Exception as e:
+            logger.error(f"Failed to create organization secrets for {org_id}: {e}")
+            raise
+
+    async def create_app_client_secrets(self, org_id: str, app_id: str, redirect_uris: List[str]) -> str:
+        """Create Keycloak client secrets for an app within an organization"""
+        try:
+            client_id = f"{app_id}-client"
+            client_secret = self._generate_password(48)
+            realm_name = f"org-{org_id}"
+
+            client_path = await self.store_secret(
+                org_id, "apps", f"{app_id}_client",
+                {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "realm": realm_name,
+                    "redirect_uris": redirect_uris,
+                    "web_origins": [f"https://{org_id}.suranku.net"],
+                    "enabled": True
+                },
+                {"type": "app_client", "app_id": app_id, "realm": realm_name}
+            )
+
+            logger.info(f"Created {app_id} client secrets for org {org_id}")
+            return client_path
+
+        except Exception as e:
+            logger.error(f"Failed to create app client secrets for {app_id} in org {org_id}: {e}")
+            raise
+
+    async def get_organization_config(self, org_id: str) -> Optional[Dict[str, Any]]:
+        """Get organization configuration"""
+        return await self.get_secret(org_id, "config", "organization")
+
+    async def get_keycloak_admin_secrets(self, org_id: str) -> Optional[Dict[str, Any]]:
+        """Get Keycloak admin credentials for organization"""
+        return await self.get_secret(org_id, "keycloak", "admin")
+
+    async def get_app_client_secrets(self, org_id: str, app_id: str) -> Optional[Dict[str, Any]]:
+        """Get app client secrets for organization"""
+        return await self.get_secret(org_id, "apps", f"{app_id}_client")
+
+    async def update_organization_apps(self, org_id: str, enabled_apps: List[str]) -> bool:
+        """Update enabled apps list for organization"""
+        try:
+            # Get current config
+            current_config = await self.get_organization_config(org_id)
+            if not current_config:
+                logger.error(f"Organization {org_id} config not found")
+                return False
+
+            # Update enabled apps
+            current_config["enabled_apps"] = enabled_apps
+            current_config["updated_at"] = datetime.utcnow().isoformat()
+
+            # Store updated config
+            await self.store_secret(
+                org_id, "config", "organization",
+                current_config,
+                {"type": "org_config", "updated": True}
+            )
+
+            logger.info(f"Updated enabled apps for org {org_id}: {enabled_apps}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to update enabled apps for org {org_id}: {e}")
+            return False
+
+    async def delete_organization_secrets(self, org_id: str) -> int:
+        """Delete all secrets associated with an organization"""
+        try:
+            # Use existing bulk delete functionality
+            return await self.bulk_delete_tenant_secrets(org_id)
+
+        except Exception as e:
+            logger.error(f"Failed to delete organization secrets for {org_id}: {e}")
+            raise
+
+    def _generate_password(self, length: int = 32) -> str:
+        """Generate a secure random password"""
+        import secrets
+        import string
+        alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+        return ''.join(secrets.choice(alphabet) for _ in range(length))

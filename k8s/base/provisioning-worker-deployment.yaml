@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tenants-provisioning-worker
+  labels:
+    app: tenants-provisioning-worker
+    tier: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tenants-provisioning-worker
+  template:
+    metadata:
+      labels:
+        app: tenants-provisioning-worker
+        tier: backend
+      annotations:
+        # Vault Agent Injection annotations
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "tenant-services-role"
+        vault.hashicorp.com/agent-inject-status: "update"
+        vault.hashicorp.com/agent-inject-secret-keycloak-admin: "secret/data/keycloak/platform/admin"
+        vault.hashicorp.com/agent-inject-template-keycloak-admin: |
+          {{- with secret "secret/data/keycloak/platform/admin" -}}
+          export KEYCLOAK_ADMIN_USERNAME="{{ .Data.data.username }}"
+          export KEYCLOAK_ADMIN_PASSWORD="{{ .Data.data.password }}"
+          export KEYCLOAK_CLIENT_SECRET="{{ .Data.data.keycloak_client_secret }}"
+          {{- end -}}
+    spec:
+      serviceAccountName: tenant-services-sa
+      containers:
+      - name: provisioning-worker
+        image: surankutech-tenants-service:v2.26
+        command: ["python3", "-m", "workers.provisioning_worker"]
+        env:
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: environment
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: database-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: redis-url
+        - name: KEYCLOAK_URL
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: keycloak-url
+        - name: KEYCLOAK_REALM
+          value: "suranku-platform"
+        - name: KEYCLOAK_CLIENT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: keycloak-client-id
+        # Kafka configuration
+        - name: KAFKA_ENABLE
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: kafka-enable
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: kafka-bootstrap-servers
+        - name: KAFKA_CLIENT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: kafka-client-id
+        - name: TENANT_EVENTS_TOPIC
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: tenant-events-topic
+        - name: TENANT_PROVISIONING_TOPIC
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: tenant-provisioning-topic
+        - name: PROVISIONING_WORKER_ENABLE
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: provisioning-worker-enable
+        - name: PROVISIONING_CONSUMER_GROUP
+          value: "tenants-provisioner"
+        # DNS configuration for domain provisioning
+        - name: LOCAL_DATA_PLANE_DOMAIN
+          value: "local.suranku"
+        # Cert-manager configuration
+        - name: CERT_MANAGER_CLUSTER_ISSUER
+          value: "local-ca"
+        # Vault configuration
+        - name: VAULT_ADDR
+          value: "http://suranku-vault.shared-services.svc.cluster.local:8200"
+        - name: VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: vault-token
+        - name: VAULT_ADMIN_SECRET_FILE_PATH
+          value: "/vault/secrets/keycloak-admin"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000

@@ -150,6 +150,14 @@ class TenantAppAccess(Base):
     user_limit = Column(Integer, default=5)
     current_users = Column(Integer, default=0)
 
+    # Data plane metadata
+    network_tier = Column(String(30), default="shared", index=True)
+    ingress_hostname = Column(String(255), nullable=True)
+    provisioning_state = Column(String(50), default="not_started", index=True)
+    dns_status = Column(String(50), default="pending", index=True)
+    provisioning_error = Column(Text, nullable=True)
+    last_synced_at = Column(DateTime, nullable=True)
+
     # Feature flags (JSON array of enabled features)
     enabled_features = Column(JSON, default=list)
 
@@ -161,6 +169,7 @@ class TenantAppAccess(Base):
     __table_args__ = (
         UniqueConstraint('tenant_id', 'app_name', name='uix_tenant_app'),
         Index('idx_app_access_enabled', 'tenant_id', 'is_enabled'),
+        Index('idx_app_access_provisioning', 'tenant_id', 'app_name', 'provisioning_state'),
     )
 
 class FeatureFlag(Base):

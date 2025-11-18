@@ -8,12 +8,17 @@ resources:
 # Environment-specific patches
 patchesStrategicMerge:
 - configmap-patch.yaml
-- secret-patch.yaml
 
 # Namespace
 namespace: tenant-services
 
+# Common labels for all resources in this environment
+commonLabels:
+  environment: production
+  app.kubernetes.io/component: tenant-service
+  app.kubernetes.io/part-of: suranku-platform
+
 # Images
 images:
 - name: surankutech-tenants-service
-  newTag: v2.19
+  newTag: v2.6

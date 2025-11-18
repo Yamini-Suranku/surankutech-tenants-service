@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenants-config
+data:
+  environment: "staging"
+  keycloak-url: "https://staging.id.suranku.com"
+  # Staging-specific Application Base URL for email links (AWS format)
+  app-base-url: "https://staging.tenants.suranku.com"
+  # Cloud Storage Configuration for staging (AWS S3)
+  storage-type: "s3"
+  storage-endpoint: ""  # Empty for AWS S3
+  storage-bucket-name: "staging-tenants-data"
+  storage-region: "us-east-1"
+  storage-use-ssl: "true"
+  # SMTP Configuration for staging
+  smtp-host: "smtp.gmail.com"
+  smtp-port: "587"
+  smtp-use-tls: "true"
+  email-from: "admin@suranku.com"
+  email-from-name: "SurankuTech Staging"
+  log-level: "INFO"

@@ -2,10 +2,14 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
+- serviceaccount.yaml
+- rbac.yaml
 - deployment.yaml
+- provisioning-worker-deployment.yaml
 - service.yaml
 - configmap.yaml
 - secret.yaml
+- blackbox-configmap.yaml
 
 commonLabels:
   app.kubernetes.io/name: tenants-service

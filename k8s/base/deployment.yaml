@@ -15,10 +15,23 @@ spec:
       labels:
         app: tenants-service
         tier: backend
+      annotations:
+        # Vault Agent Injection annotations
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "tenant-services-role"
+        vault.hashicorp.com/agent-inject-status: "update"
+        vault.hashicorp.com/agent-inject-secret-keycloak-admin: "secret/data/keycloak/platform/admin"
+        vault.hashicorp.com/agent-inject-template-keycloak-admin: |
+          {{- with secret "secret/data/keycloak/platform/admin" -}}
+          export KEYCLOAK_ADMIN_USERNAME="{{ .Data.data.username }}"
+          export KEYCLOAK_ADMIN_PASSWORD="{{ .Data.data.password }}"
+          export KEYCLOAK_CLIENT_SECRET="{{ .Data.data.keycloak_client_secret }}"
+          {{- end -}}
     spec:
+      serviceAccountName: tenant-services-sa
       containers:
       - name: tenants-service
-        image: tenants-service:latest
+        image: surankutech-tenants-service:v2.26
         ports:
         - containerPort: 8000
           name: http
@@ -45,6 +58,13 @@ spec:
             configMapKeyRef:
               name: tenants-config
               key: keycloak-url
+        - name: KEYCLOAK_REALM
+          value: "suranku-platform"
+        - name: KEYCLOAK_CLIENT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: keycloak-client-id
         # Cloud-agnostic Object Storage (S3-compatible)
         - name: STORAGE_TYPE
           valueFrom:
@@ -81,6 +101,103 @@ spec:
             configMapKeyRef:
               name: tenants-config
               key: storage-use-ssl
+        # Vault configuration
+        - name: VAULT_ADDR
+          value: "http://suranku-vault.shared-services.svc.cluster.local:8200"
+        - name: VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: vault-token
+        # Vault Secret File Path
+        - name: VAULT_ADMIN_SECRET_FILE_PATH
+          value: "/vault/secrets/keycloak-admin"
+        # Application Base URL for email links
+        - name: APP_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: app-base-url
+        # SMTP Configuration
+        - name: SMTP_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: smtp-host
+        - name: SMTP_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: smtp-port
+        - name: SMTP_USE_TLS
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: smtp-use-tls
+        - name: SMTP_USER
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: smtp-user
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: tenants-secrets
+              key: smtp-password
+        - name: EMAIL_FROM
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: email-from
+        - name: EMAIL_FROM_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: email-from-name
+        - name: FRONTEND_URL
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: frontend-url
+        # Kafka / provisioning events
+        - name: KAFKA_ENABLE
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: kafka-enable
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: kafka-bootstrap-servers
+        - name: KAFKA_CLIENT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: kafka-client-id
+        - name: TENANT_EVENTS_TOPIC
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: tenant-events-topic
+        - name: TENANT_PROVISIONING_TOPIC
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: tenant-provisioning-topic
+        - name: PROVISIONING_WORKER_ENABLE
+          valueFrom:
+            configMapKeyRef:
+              name: tenants-config
+              key: provisioning-worker-enable
+        # Cert-manager configuration
+        - name: CERT_MANAGER_CLUSTER_ISSUER
+          value: "local-ca"
+        # DNS configuration for domain provisioning
+        - name: LOCAL_DATA_PLANE_DOMAIN
+          value: "local.suranku"
+        # - name: DATA_PLANE_DOMAIN
+        #   value: "your-domain.com"  # Uncomment and set for production
         resources:
           requests:
             memory: "256Mi"
@@ -111,7 +228,21 @@ spec:
           capabilities:
             drop:
             - ALL
+      - name: tenants-health-exporter
+        image: prom/blackbox-exporter:v0.25.0
+        args:
+          - "--config.file=/etc/blackbox/blackbox.yml"
+        ports:
+          - containerPort: 9115
+            name: metrics
+        volumeMounts:
+          - name: tenants-blackbox-config
+            mountPath: /etc/blackbox
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      volumes:
+        - name: tenants-blackbox-config
+          configMap:
+            name: tenants-blackbox-config

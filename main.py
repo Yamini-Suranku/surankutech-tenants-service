@@ -11,6 +11,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 # Import all module routers
 from modules.tenant_management import router as tenant_router
+from modules.organization_management import router as org_router
 from modules.authentication import router as auth_router
 from modules.email_verification import router as email_router
 from modules.user_management import router as user_router
@@ -68,9 +69,10 @@ async def health_check():
 
 # Include all module routers
 app.include_router(tenant_router)           # /tenants/*
+app.include_router(org_router)              # /tenants/{id}/orgs/* and /orgs/* (organization management)
+app.include_router(user_router)             # /tenants/{id}/users, etc. (must come after org_router to avoid conflicts)
 app.include_router(auth_router)             # /auth/*
 app.include_router(email_router)            # /auth/verify-email, etc.
-app.include_router(user_router)             # /tenants/{id}/users, etc.
 app.include_router(profile_router)          # /user/profile, /user/password
 app.include_router(social_router)           # /auth/social/*
 app.include_router(upload_router)  # File upload routes (Kong strips /api/upload)
@@ -140,7 +142,7 @@ async def service_info():
 async def startup_event():
     """Application startup tasks"""
     logger.info("🚀 Tenants Service v2.0.0 starting up...")
-    logger.info("📦 Modules loaded: tenant_management, authentication, email_verification, user_management, social_auth, file_upload, ldap_management")
+    logger.info("📦 Modules loaded: tenant_management, organization_management, authentication, email_verification, user_management, social_auth, file_upload, ldap_management")
     logger.info("🔗 Keycloak integration enabled")
     logger.info("📧 Email verification enabled")
     logger.info("🌐 Social authentication enabled")

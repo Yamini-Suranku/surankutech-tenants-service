@@ -10,6 +10,7 @@ python-dotenv==1.0.0
 python-keycloak==5.8.1
 email-validator==2.2.0
 prometheus-fastapi-instrumentator==6.1.0
+confluent-kafka==2.3.0
 
 # File storage dependencies
 minio==7.2.0

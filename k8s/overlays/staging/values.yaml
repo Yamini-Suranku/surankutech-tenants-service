@@ -1,0 +1,60 @@
+# SurankuTech Tenants Service - Staging Environment Configuration
+
+# Global configuration
+global:
+  namespace: tenant-services
+  imageRegistry: docker.io
+  imagePullPolicy: Always
+
+# Application configuration
+app:
+  name: tenants-service
+  version: v2.6
+  replicas: 3
+  port: 8000
+
+# Infrastructure overrides for staging environment
+infrastructure:
+  # Vault configuration
+  vault:
+    enabled: true
+    address: "https://staging.vault.suranku.com"
+    role: "tenant-services-staging-role"
+    serviceAccount: "tenant-services-sa"
+
+    # Secret injection configuration
+    secrets:
+      keycloakAdmin:
+        path: "secret/data/keycloak/staging/admin"
+        mountPath: "/vault/secrets/keycloak-admin"
+        template: |
+          {{- with secret "secret/data/keycloak/staging/admin" -}}
+          KEYCLOAK_ADMIN_USERNAME={{ .Data.data.username }}
+          KEYCLOAK_ADMIN_PASSWORD={{ .Data.data.password }}
+          {{- end -}}
+
+# Environment variables for staging
+environment:
+  # Application settings
+  PORT: "8000"
+  ENVIRONMENT: "staging"
+
+  # Vault secret file paths
+  VAULT_ADMIN_SECRET_FILE_PATH: "/vault/secrets/keycloak-admin"
+
+  # Application Base URL for email links (AWS staging format)
+  APP_BASE_URL: "https://staging.tenants.suranku.com"
+
+  # Keycloak configuration
+  KEYCLOAK_URL: "https://staging.id.suranku.com"
+  KEYCLOAK_REALM: "suranku-platform"
+  KEYCLOAK_CLIENT_ID: "tenants-service"
+
+# Resource configuration for staging
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "1Gi"
+    cpu: "1000m"
