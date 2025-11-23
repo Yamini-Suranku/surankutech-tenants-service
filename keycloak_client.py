@@ -208,6 +208,25 @@ class KeycloakClient:
             logger.error(f"User creation error: {e}")
             raise Exception(f"Failed to create user: {str(e)}")
 
+    async def delete_user(self, user_id: Optional[str]) -> None:
+        """Delete a Keycloak user if the account exists."""
+        if not user_id:
+            return
+
+        try:
+            token = await self.get_admin_token()
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(
+                    f"{self.base_url}/admin/realms/{self.realm}/users/{user_id}",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+
+                if response.status_code not in (204, 404):
+                    raise Exception(f"Failed to delete Keycloak user: {response.text}")
+
+        except Exception as exc:
+            logger.warning(f"Keycloak delete user error for {user_id}: {exc}")
+
     async def create_social_user(
         self,
         email: str,
@@ -750,7 +769,8 @@ class KeycloakClient:
     async def create_ldap_federation(
         self,
         tenant_id: str,
-        ldap_config: Dict[str, Any]
+        ldap_config: Dict[str, Any],
+        organization_id: Optional[str] = None
     ) -> str:
         """Create LDAP user federation in Keycloak"""
         try:
@@ -758,8 +778,13 @@ class KeycloakClient:
 
             async with httpx.AsyncClient() as client:
                 # Build Keycloak LDAP component configuration
+                component_name = f"ldap-{tenant_id}"
+                if organization_id:
+                    component_name = f"{component_name}-{organization_id}"
+
                 component_data = {
-                    "name": f"ldap-{tenant_id}",
+                    "name": component_name,
+                    "name": component_name,
                     "providerId": "ldap",
                     "providerType": "org.keycloak.storage.UserStorageProvider",
                     "parentId": self.realm,

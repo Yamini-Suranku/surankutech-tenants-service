@@ -31,7 +31,7 @@ spec:
       serviceAccountName: tenant-services-sa
       containers:
       - name: tenants-service
-        image: surankutech-tenants-service:v2.26
+        image: surankutech-tenants-service:v2.72
         ports:
         - containerPort: 8000
           name: http
@@ -204,7 +204,7 @@ spec:
             cpu: "100m"
           limits:
             memory: "512Mi"
-            cpu: "500m"
+            cpu: "510m"
         livenessProbe:
           httpGet:
             path: /health

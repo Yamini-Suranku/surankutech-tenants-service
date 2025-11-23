@@ -20,7 +20,7 @@ from schemas import (
     TenantSwitchRequest, SocialLoginRequest, SocialLoginResponse
 )
 from keycloak_client import KeycloakClient
-from modules.tenant_management import seed_app_access_metadata
+from modules.tenant_management import seed_app_access_metadata, get_trial_features
 import secrets
 import smtplib
 import os

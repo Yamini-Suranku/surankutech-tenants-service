@@ -116,6 +116,10 @@ class ProvisioningWorker:
                 app_name=app_name,
                 ingress_hostname=payload.get("ingress_hostname"),
                 network_tier=payload.get("network_tier") or app_access.network_tier or "shared",
+                organization_id=payload.get("organization_id"),
+                organization_hostname=payload.get("organization_hostname"),
+                organization_dns_subdomain=payload.get("organization_dns_subdomain"),
+                organization_dns_zone=payload.get("organization_dns_zone"),
             )
             engine = ProvisioningEngine()
             engine.provision_app(db, app_access, context)
@@ -148,6 +152,10 @@ class ProvisioningWorker:
                 app_name=app_name,
                 ingress_hostname=payload.get("ingress_hostname") or app_access.ingress_hostname,
                 network_tier=payload.get("network_tier") or app_access.network_tier or "shared",
+                organization_id=payload.get("organization_id"),
+                organization_hostname=payload.get("organization_hostname"),
+                organization_dns_subdomain=payload.get("organization_dns_subdomain"),
+                organization_dns_zone=payload.get("organization_dns_zone"),
             )
             engine = ProvisioningEngine()
             engine.deprovision_app(db, app_access, context)

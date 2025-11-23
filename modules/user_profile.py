@@ -13,7 +13,8 @@ import hashlib
 
 from shared.database import get_db
 from shared.auth import verify_token, TokenData
-from shared.models import User
+from shared.models import User, UserTenant, AuditLog
+from models import SocialAccount, PasswordResetToken, Invitation
 from keycloak_client import KeycloakClient
 from datetime import datetime, timedelta
 
@@ -56,8 +57,6 @@ async def get_user_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Get app_roles from UserTenant relationship
-    from shared.models import UserTenant
     user_tenant = db.query(UserTenant).filter(
         UserTenant.user_id == user.id
     ).first()
@@ -117,8 +116,6 @@ async def update_user_profile(
     db.commit()
     db.refresh(user)
 
-    # Get app_roles from UserTenant relationship (same as GET endpoint)
-    from shared.models import UserTenant
     user_tenant = db.query(UserTenant).filter(
         UserTenant.user_id == user.id
     ).first()
@@ -173,3 +170,55 @@ async def change_password(
         logger.error(f"Failed to change password for user {user.email}: {e}")
         raise HTTPException(status_code=500, detail="Failed to change password")
 
+@router.delete("/user/account")
+async def delete_user_account(
+    token: str = Depends(HTTPBearer()),
+    db: Session = Depends(get_db)
+):
+    """Delete the currently authenticated user's account."""
+    token_data = await verify_token(token.credentials)
+
+    user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    active_memberships = db.query(UserTenant).filter(
+        UserTenant.user_id == user.id,
+        UserTenant.status != "deleted"
+    ).count()
+
+    if active_memberships > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Please delete or leave all tenants before removing your account."
+        )
+
+    # Remove related records
+    db.query(SocialAccount).filter(
+        SocialAccount.user_id == user.id
+    ).delete(synchronize_session=False)
+
+    db.query(PasswordResetToken).filter(
+        PasswordResetToken.user_id == user.id
+    ).delete(synchronize_session=False)
+
+    db.query(Invitation).filter(
+        Invitation.invited_by == user.id
+    ).update({"invited_by": None})
+
+    db.query(AuditLog).filter(
+        AuditLog.user_id == user.id
+    ).delete(synchronize_session=False)
+
+    # Attempt to remove from Keycloak
+    if user.keycloak_id:
+        try:
+            keycloak_client = KeycloakClient()
+            await keycloak_client.delete_user(user.keycloak_id)
+        except Exception as exc:
+            logger.warning(f"Failed to remove Keycloak user {user.email}: {exc}")
+
+    db.delete(user)
+    db.commit()
+
+    return {"status": "deleted", "message": "Account removed successfully"}

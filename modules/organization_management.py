@@ -3,15 +3,25 @@ Organization Management Module
 Handles organization-level operations within the tenant -> organization -> apps hierarchy
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 from datetime import datetime
 
 from shared.database import get_db
 from shared.auth import TokenData, get_current_token_data, require_platform_admin_access
-from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog
+from shared.models import Tenant, UserTenant, TenantAppAccess, AuditLog
+from models import Organization, OrganizationAppAccess, OrganizationUserRole
+from schemas import (
+    OrganizationCreateRequest,
+    OrganizationDNSRequest,
+    OrganizationListResponse,
+    OrganizationResponse,
+    TenantDomainCheckRequest,
+    TenantDomainCheckResponse,
+)
 from modules.tenant_management import (
     get_or_create_user_from_token,
     get_app_user_limit,
@@ -22,6 +32,9 @@ from modules.tenant_management import (
     ensure_user_has_app_admin,
     notify_app_enabled,
     notify_app_disabled,
+    validate_subdomain_candidate,
+    slugify,
+    generate_domain_suggestions,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,7 +67,102 @@ APP_CATALOG = {
     }
 }
 
-@router.get("/tenants/{tenant_id}/orgs")
+DEFAULT_DNS_ZONE = "local.suranku"
+APP_DEFAULT_PATHS = {
+    "darkhole": "/darkhole/login.html",
+    "darkfolio": "/darkfolio/",
+    "confiploy": "/confiploy/",
+}
+
+def _user_has_tenant_admin_access(user_tenant: Optional[UserTenant]) -> bool:
+    if not user_tenant or not user_tenant.app_roles:
+        return False
+    for roles in user_tenant.app_roles.values():
+        if any(role in {"admin", "administrator", "owner", "tenant_admin"} for role in roles):
+            return True
+    return False
+
+def _serialize_org(org: Organization, tenant: Optional[Tenant] = None) -> Dict[str, Any]:
+    return {
+        "id": org.id,
+        "tenant_id": org.tenant_id,
+        "name": org.name,
+        "slug": org.slug,
+        "description": org.description,
+        "dns_subdomain": org.dns_subdomain,
+        "dns_zone": org.dns_zone,
+        "dns_hostname": org.dns_hostname,
+        "dns_status": org.dns_status,
+        "status": org.status,
+        "is_default": org.is_default,
+        "created_at": org.created_at,
+        "updated_at": org.updated_at,
+    }
+
+def _build_org_hostname(org: Organization) -> str:
+    if org.dns_hostname:
+        return org.dns_hostname
+    zone = org.dns_zone or DEFAULT_DNS_ZONE
+    return f"{org.dns_subdomain}.{zone}"
+
+def _grant_org_roles(
+    db: Session,
+    tenant_id: str,
+    org_id: str,
+    user_id: str,
+    app_roles: Dict[str, List[str]],
+    granted_by: Optional[str],
+    granted_via: str,
+):
+    for app_name, roles in app_roles.items():
+        normalized = sorted(set(roles))
+        entry = db.query(OrganizationUserRole).filter(
+            OrganizationUserRole.organization_id == org_id,
+            OrganizationUserRole.user_id == user_id,
+            OrganizationUserRole.app_name == app_name,
+        ).first()
+        if normalized:
+            if entry:
+                entry.roles = normalized
+                entry.granted_by = granted_by
+                entry.granted_via = granted_via
+            else:
+                db.add(OrganizationUserRole(
+                    tenant_id=tenant_id,
+                    organization_id=org_id,
+                    user_id=user_id,
+                    app_name=app_name,
+                    roles=normalized,
+                    granted_by=granted_by,
+                    granted_via=granted_via,
+                ))
+        elif entry:
+            db.delete(entry)
+
+def _seed_org_birthright_roles(
+    db: Session,
+    tenant_id: str,
+    org_id: str,
+    granted_by: Optional[str] = None,
+) -> None:
+    admins = db.query(UserTenant).filter(
+        UserTenant.tenant_id == tenant_id,
+        UserTenant.status.in_(["active", "pending"])
+    ).all()
+    birthright_apps = {app: ["admin"] for app in APP_CATALOG.keys()}
+    for membership in admins:
+        if _user_has_tenant_admin_access(membership):
+            _grant_org_roles(
+                db,
+                tenant_id=tenant_id,
+                org_id=org_id,
+                user_id=membership.user_id,
+                app_roles=birthright_apps,
+                granted_by=granted_by,
+                granted_via="birthright",
+            )
+
+@router.get("/tenants/{tenant_id}/orgs", response_model=OrganizationListResponse)
 async def list_organizations(
     tenant_id: str,
     token_data: TokenData = Depends(get_current_token_data),
@@ -71,25 +179,227 @@ async def list_organizations(
     if not user_tenant:
         raise HTTPException(status_code=403, detail="Access denied to tenant")
 
-    # For now, return the tenant as the default organization
-    # In the future, this will return multiple organizations
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
-    return {
-        "organizations": [
-            {
-                "id": "default",
-                "name": tenant.name,
-                "domain": tenant.domain,
-                "tenant_id": tenant_id,
-                "is_default": True,
-                "created_at": tenant.created_at.isoformat(),
-                "member_count": 1  # Simplified for now
-            }
-        ]
-    }
+    orgs = db.query(Organization).filter(
+        Organization.tenant_id == tenant_id,
+        Organization.deleted_at.is_(None)
+    ).order_by(Organization.created_at.asc()).all()
+
+    payloads = [OrganizationResponse(**_serialize_org(org, tenant)) for org in orgs]
+    return OrganizationListResponse(organizations=payloads)
+
+@router.post("/tenants/{tenant_id}/orgs/check-domain", response_model=TenantDomainCheckResponse)
+async def check_org_domain(
+    tenant_id: str,
+    request: TenantDomainCheckRequest,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db)
+):
+    """Validate whether an organization subdomain is available."""
+    user = get_or_create_user_from_token(db, token_data)
+    user_tenant = db.query(UserTenant).filter(
+        UserTenant.user_id == user.id,
+        UserTenant.tenant_id == tenant_id
+    ).first()
+
+    if not user_tenant:
+        raise HTTPException(status_code=403, detail="Access denied to tenant")
+
+    if not _user_has_tenant_admin_access(user_tenant):
+        raise HTTPException(status_code=403, detail="Admin access required to manage organizations")
+
+    sanitized, validation_errors = validate_subdomain_candidate(request.desired_subdomain)
+    if validation_errors:
+        return TenantDomainCheckResponse(
+            available=False,
+            sanitized=sanitized or slugify(request.desired_subdomain),
+            suggestions=[],
+            errors=validation_errors
+        )
+
+    tenant_conflict = db.query(Tenant).filter(Tenant.domain == sanitized).first()
+    org_conflict = db.query(Organization).filter(Organization.dns_subdomain == sanitized).first()
+    available = tenant_conflict is None and org_conflict is None
+
+    suggestions = [] if available else generate_domain_suggestions(db, sanitized)
+    errors = [] if available else ["This organization name is already taken"]
+
+    return TenantDomainCheckResponse(
+        available=available,
+        sanitized=sanitized,
+        suggestions=suggestions,
+        errors=errors
+    )
+
+@router.post("/tenants/{tenant_id}/orgs", response_model=OrganizationResponse)
+async def create_organization(
+    tenant_id: str,
+    request: OrganizationCreateRequest,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db)
+):
+    """Create a new organization within a tenant."""
+    user = get_or_create_user_from_token(db, token_data)
+    user_tenant = db.query(UserTenant).filter(
+        UserTenant.user_id == user.id,
+        UserTenant.tenant_id == tenant_id
+    ).first()
+
+    if not user_tenant:
+        raise HTTPException(status_code=403, detail="Access denied to tenant")
+
+    if not _user_has_tenant_admin_access(user_tenant):
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access is required to create organizations"
+        )
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    slug_candidate, validation_errors = validate_subdomain_candidate(
+        request.desired_subdomain or request.name
+    )
+    if validation_errors:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=validation_errors)
+
+    # Ensure slug is unique across tenants and organizations
+    duplicate_tenant = db.query(Tenant).filter(Tenant.domain == slug_candidate).first()
+    duplicate_org = db.query(Organization).filter(
+        or_(
+            Organization.slug == slug_candidate,
+            Organization.dns_subdomain == slug_candidate
+        )
+    ).first()
+
+    if duplicate_tenant or duplicate_org:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Organization domain is already reserved"
+        )
+
+    dns_zone = request.dns_zone or DEFAULT_DNS_ZONE
+    organization = Organization(
+        tenant_id=tenant_id,
+        name=request.name,
+        slug=slug_candidate,
+        description=request.description,
+        dns_subdomain=slug_candidate,
+        dns_zone=dns_zone,
+        dns_hostname=f"{slug_candidate}.{dns_zone}" if dns_zone else slug_candidate,
+        dns_status="reserved",
+        created_by=user.id
+    )
+    db.add(organization)
+
+    audit_log = AuditLog(
+        tenant_id=tenant_id,
+        user_id=user.id,
+        action="organization_created",
+        resource_type="organization",
+        resource_id=organization.id,
+        details={
+            "organization_name": organization.name,
+            "dns_hostname": organization.dns_hostname,
+            "created_by": user.email
+        }
+    )
+    db.add(audit_log)
+
+    # Ensure tenant admins receive birthright org roles
+    db.flush()
+    _seed_org_birthright_roles(
+        db=db,
+        tenant_id=tenant_id,
+        org_id=organization.id,
+        granted_by=user.id,
+    )
+
+    db.commit()
+    db.refresh(organization)
+
+    return OrganizationResponse(**_serialize_org(organization, tenant))
+
+@router.post("/tenants/{tenant_id}/orgs/{org_id}/dns/reserve", response_model=OrganizationResponse)
+async def reserve_org_dns(
+    tenant_id: str,
+    org_id: str,
+    request: OrganizationDNSRequest,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db)
+):
+    """Reserve or update the DNS assignment for an organization."""
+    user = get_or_create_user_from_token(db, token_data)
+    user_tenant = db.query(UserTenant).filter(
+        UserTenant.user_id == user.id,
+        UserTenant.tenant_id == tenant_id
+    ).first()
+
+    if not user_tenant:
+        raise HTTPException(status_code=403, detail="Access denied to tenant")
+
+    if not _user_has_tenant_admin_access(user_tenant):
+        raise HTTPException(status_code=403, detail="Admin access required to manage DNS")
+
+    organization = db.query(Organization).filter(
+        Organization.id == org_id,
+        Organization.tenant_id == tenant_id,
+        Organization.deleted_at.is_(None)
+    ).first()
+
+    if not organization:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    slug_candidate, validation_errors = validate_subdomain_candidate(request.desired_subdomain)
+    if validation_errors:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=validation_errors)
+
+    duplicate = db.query(Organization).filter(
+        Organization.id != org_id,
+        or_(
+            Organization.slug == slug_candidate,
+            Organization.dns_subdomain == slug_candidate
+        )
+    ).first()
+
+    duplicate_tenant = db.query(Tenant).filter(Tenant.domain == slug_candidate).first()
+
+    if duplicate or duplicate_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Domain is already assigned to another organization"
+        )
+
+    dns_zone = request.dns_zone or organization.dns_zone or DEFAULT_DNS_ZONE
+    organization.slug = slug_candidate
+    organization.dns_subdomain = slug_candidate
+    organization.dns_zone = dns_zone
+    organization.dns_hostname = f"{slug_candidate}.{dns_zone}" if dns_zone else slug_candidate
+    organization.dns_status = "reserved"
+    organization.updated_at = datetime.utcnow()
+
+    audit_log = AuditLog(
+        tenant_id=tenant_id,
+        user_id=user.id,
+        action="organization_dns_reserved",
+        resource_type="organization",
+        resource_id=org_id,
+        details={
+            "organization_name": organization.name,
+            "dns_hostname": organization.dns_hostname,
+            "reserved_by": user.email
+        }
+    )
+    db.add(audit_log)
+    db.commit()
+    db.refresh(organization)
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    return OrganizationResponse(**_serialize_org(organization, tenant))
 
 @router.get("/tenants/{tenant_id}/orgs/{org_id}/apps")
 async def get_organization_apps(
@@ -109,12 +419,29 @@ async def get_organization_apps(
     if not user_tenant:
         raise HTTPException(status_code=403, detail="Access denied to tenant")
 
+    organization = None
+    if org_id != "default":
+        organization = db.query(Organization).filter(
+            Organization.id == org_id,
+            Organization.tenant_id == tenant_id,
+            Organization.deleted_at.is_(None)
+        ).first()
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
     # Get app access metadata for this tenant
     app_access_records = db.query(TenantAppAccess).filter(
         TenantAppAccess.tenant_id == tenant_id
     ).all()
     enabled_app_ids = {app.app_name for app in app_access_records if app.is_enabled}
     app_access_map = {access.app_name: access for access in app_access_records}
+
+    org_app_map: Dict[str, OrganizationAppAccess] = {}
+    if organization:
+        org_app_records = db.query(OrganizationAppAccess).filter(
+            OrganizationAppAccess.organization_id == organization.id
+        ).all()
+        org_app_map = {record.app_name: record for record in org_app_records}
 
     # Build available apps list with enabled status
     available_apps = []
@@ -143,6 +470,16 @@ async def get_organization_apps(
                 "enabled_features": access_record.enabled_features or [],
                 "user_limit": access_record.user_limit,
                 "current_users": access_record.current_users
+            })
+
+        org_app_access = org_app_map.get(app_id)
+        if org_app_access:
+            app_data.update({
+                "org_app_enabled": org_app_access.is_enabled,
+                "org_ingress_path": org_app_access.ingress_path,
+                "org_ingress_hostname": org_app_access.ingress_hostname,
+                "org_dns_status": org_app_access.dns_status,
+                "org_provisioning_state": org_app_access.provisioning_state,
             })
 
         available_apps.append(app_data)
@@ -190,6 +527,16 @@ async def enable_organization_app(
     if not has_admin_role:
         raise HTTPException(status_code=403, detail="Admin or administrator role required to manage apps")
 
+    organization = None
+    if org_id != "default":
+        organization = db.query(Organization).filter(
+            Organization.id == org_id,
+            Organization.tenant_id == tenant_id,
+            Organization.deleted_at.is_(None)
+        ).first()
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
     # Check for existing app access record
     app_access = db.query(TenantAppAccess).filter(
         TenantAppAccess.tenant_id == tenant_id,
@@ -215,6 +562,37 @@ async def enable_organization_app(
 
     ensure_user_has_app_admin(user_tenant, app_id)
 
+    if organization:
+        # Clear any tenant-level ingress hostname so provisioning uses org DNS
+        app_access.ingress_hostname = None
+        logger.info(
+            "Enabling app %s for organization %s (tenant=%s, dns=%s)",
+            app_id,
+            organization.id,
+            tenant_id,
+            organization.dns_hostname or organization.dns_subdomain,
+        )
+        org_app_access = db.query(OrganizationAppAccess).filter(
+            OrganizationAppAccess.organization_id == organization.id,
+            OrganizationAppAccess.app_name == app_id
+        ).first()
+
+        if not org_app_access:
+            org_app_access = OrganizationAppAccess(
+                tenant_id=tenant_id,
+                organization_id=organization.id,
+                app_name=app_id
+            )
+            db.add(org_app_access)
+
+        org_app_access.is_enabled = True
+        org_app_access.ingress_path = APP_DEFAULT_PATHS.get(app_id, f"/{app_id}/")
+        org_app_access.ingress_hostname = _build_org_hostname(organization)
+        org_app_access.dns_status = organization.dns_status
+        org_app_access.provisioning_state = app_access.provisioning_state
+        org_app_access.enabled_at = datetime.utcnow()
+        org_app_access.disabled_at = None
+
     # Create audit log
     audit_log = AuditLog(
         tenant_id=tenant_id,
@@ -232,7 +610,29 @@ async def enable_organization_app(
 
     db.commit()
 
-    await notify_app_enabled(user_tenant.tenant, app_access, user.email, org_id)
+    org_hostname = organization.dns_hostname if organization else None
+    org_subdomain = organization.dns_subdomain if organization else None
+    org_zone = organization.dns_zone if organization else None
+
+    logger.info(
+        "notify_app_enabled payload: tenant=%s app=%s org=%s hostname=%s subdomain=%s zone=%s",
+        tenant_id,
+        app_id,
+        org_id,
+        org_hostname,
+        org_subdomain,
+        org_zone,
+    )
+
+    await notify_app_enabled(
+        user_tenant.tenant,
+        app_access,
+        user.email,
+        org_id,
+        org_hostname,
+        org_subdomain,
+        org_zone,
+    )
 
     return {
         "status": "enabled",
@@ -273,6 +673,16 @@ async def disable_organization_app(
     if not has_admin_role:
         raise HTTPException(status_code=403, detail="Admin or administrator role required to manage apps")
 
+    organization = None
+    if org_id != "default":
+        organization = db.query(Organization).filter(
+            Organization.id == org_id,
+            Organization.tenant_id == tenant_id,
+            Organization.deleted_at.is_(None)
+        ).first()
+        if not organization:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
     # Find and disable the app
     app_access = db.query(TenantAppAccess).filter(
         TenantAppAccess.tenant_id == tenant_id,
@@ -299,6 +709,16 @@ async def disable_organization_app(
         )
         db.add(audit_log)
 
+        if organization:
+            org_app_access = db.query(OrganizationAppAccess).filter(
+                OrganizationAppAccess.organization_id == organization.id,
+                OrganizationAppAccess.app_name == app_id
+            ).first()
+            if org_app_access:
+                org_app_access.is_enabled = False
+                org_app_access.disabled_at = datetime.utcnow()
+                org_app_access.provisioning_state = "disabled"
+
         db.commit()
 
         await notify_app_disabled(user_tenant.tenant, app_id, user.email, org_id)
@@ -318,8 +738,7 @@ async def delete_organization(
     token_data: TokenData = Depends(get_current_token_data),
     db: Session = Depends(get_db)
 ):
-    """Delete an organization (currently deletes the entire tenant since we have flat structure)"""
-    # Verify user access to tenant
+    """Delete (soft delete) an organization."""
     user = get_or_create_user_from_token(db, token_data)
     user_tenant = db.query(UserTenant).filter(
         UserTenant.user_id == user.id,
@@ -329,60 +748,30 @@ async def delete_organization(
     if not user_tenant:
         raise HTTPException(status_code=403, detail="Access denied to tenant")
 
-    # Check if user has admin role for this tenant
-    has_admin_role = False
-    for app in ["darkhole", "darkfolio", "confiploy"]:
-        app_roles = user_tenant.app_roles.get(app, [])
-        if any(role in ["admin", "administrator"] for role in app_roles):
-            has_admin_role = True
-            break
+    if not _user_has_tenant_admin_access(user_tenant):
+        raise HTTPException(status_code=403, detail="Admin access required to delete organizations")
 
-    if not has_admin_role:
-        raise HTTPException(status_code=403, detail="Admin or administrator role required to delete organization")
+    organization = db.query(Organization).filter(
+        Organization.id == org_id,
+        Organization.tenant_id == tenant_id,
+        Organization.deleted_at.is_(None)
+    ).first()
 
-    # Find the tenant creator/owner - the first user who joined with admin roles
-    tenant_creator = db.query(UserTenant).filter(
-        UserTenant.tenant_id == tenant_id,
-        UserTenant.status == "active"
-    ).order_by(UserTenant.created_at.asc()).first()
-
-    # Only allow the original creator to delete the organization
-    if not tenant_creator or tenant_creator.user_id != user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="Only the organization creator/owner can delete this organization"
-        )
-
-    # Get the tenant
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
+    if not organization:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Check if there are other active users in this tenant
-    other_users_count = db.query(UserTenant).filter(
-        UserTenant.tenant_id == tenant_id,
-        UserTenant.user_id != user.id,
-        UserTenant.status == "active"
-    ).count()
+    if organization.is_default:
+        raise HTTPException(status_code=400, detail="Default organization cannot be deleted")
 
-    if other_users_count > 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot delete organization with {other_users_count} other active members. Remove all other members first."
-        )
+    organization.status = "deleted"
+    organization.deleted_at = datetime.utcnow()
 
-    # Soft delete - mark as inactive instead of hard delete to preserve audit trail
-    tenant.is_active = False
-
-    # Also deactivate all user-tenant relationships
-    db.query(UserTenant).filter(UserTenant.tenant_id == tenant_id).update({
-        "status": "deleted"
-    })
-
-    # Disable all app access for this tenant
-    db.query(TenantAppAccess).filter(TenantAppAccess.tenant_id == tenant_id).update({
+    db.query(OrganizationAppAccess).filter(
+        OrganizationAppAccess.organization_id == organization.id
+    ).update({
         "is_enabled": False,
-        "current_users": 0
+        "disabled_at": datetime.utcnow(),
+        "provisioning_state": "deleted"
     })
 
     # Create audit log
@@ -393,10 +782,9 @@ async def delete_organization(
         resource_type="organization",
         resource_id=org_id,
         details={
-            "organization_name": tenant.name,
-            "domain": tenant.domain,
-            "deleted_by": user.email,
-            "other_users_count": other_users_count
+            "organization_name": organization.name,
+            "dns_hostname": organization.dns_hostname,
+            "deleted_by": user.email
         }
     )
     db.add(audit_log)
@@ -405,13 +793,13 @@ async def delete_organization(
 
     return {
         "status": "deleted",
-        "message": f"Organization '{tenant.name}' has been deleted successfully",
+        "message": f"Organization '{organization.name}' has been deleted successfully",
         "tenant_id": tenant_id,
         "org_id": org_id
     }
 
 # Cross-tenant organization access routes
-@router.get("/orgs/{org_id}")
+@router.get("/orgs/{org_id}", response_model=OrganizationResponse)
 async def get_organization_details(
     org_id: str,
     token_data: TokenData = Depends(get_current_token_data),
@@ -425,34 +813,12 @@ async def get_organization_details(
             detail="Platform administrator access required for cross-tenant operations"
         )
 
-    # For now, org_id is "default" for all tenants
-    # In future, we'll have proper org management
-    if org_id != "default":
+    organization = db.query(Organization).filter(
+        Organization.id == org_id
+    ).first()
+
+    if not organization:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Platform admins can see all tenants, not just user-accessible ones
-    all_tenants = db.query(Tenant).filter(
-        Tenant.is_active == True
-    ).all()
-
-    organizations = []
-    for tenant in all_tenants:
-        # Get member count for this tenant
-        member_count = db.query(UserTenant).filter(
-            UserTenant.tenant_id == tenant.id,
-            UserTenant.status == "active"
-        ).count()
-
-        organizations.append({
-            "id": "default",
-            "name": tenant.name,
-            "domain": tenant.domain,
-            "tenant_id": tenant.id,
-            "is_default": True,
-            "created_at": tenant.created_at.isoformat(),
-            "member_count": member_count
-        })
-
-    return {
-        "organizations": organizations
-    }
+    tenant = db.query(Tenant).filter(Tenant.id == organization.tenant_id).first()
+    return OrganizationResponse(**_serialize_org(organization, tenant))

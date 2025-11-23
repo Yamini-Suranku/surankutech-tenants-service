@@ -82,4 +82,11 @@ create_tables
 
 echo "3️⃣ Starting FastAPI service..."
 echo "=================================================="
-exec uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+UVICORN_PORT=${PORT:-8000}
+if [ "${UVICORN_RELOAD:-false}" = "true" ]; then
+    echo "ℹ️ Uvicorn reload enabled (UVICORN_RELOAD=${UVICORN_RELOAD})"
+    exec uvicorn main:app --host 0.0.0.0 --port "${UVICORN_PORT}" --reload
+else
+    echo "ℹ️ Starting Uvicorn without auto-reload (set UVICORN_RELOAD=true to enable)"
+    exec uvicorn main:app --host 0.0.0.0 --port "${UVICORN_PORT}"
+fi

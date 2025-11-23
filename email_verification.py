@@ -426,8 +426,8 @@ class EmailVerificationService(BaseEmailService):
         Returns:
             Complete verification URL
         """
-        base_url = os.getenv("APP_BASE_URL", "http://localhost:8010")
-        return f"{base_url}/api/tenants/auth/verify-email?email={email}&token={token}"
+        base_url = os.getenv("FRONTEND_BASE_URL", "http://home.local.suranku")
+        return f"{base_url}/verify-email?email={email}&token={token}"
 
     def _build_email_content(self, **kwargs) -> tuple[str, str]:
         """
@@ -501,8 +501,8 @@ class EmailVerificationService(BaseEmailService):
         """
         email = kwargs['email']
         token = kwargs['token']
-        config = self._get_smtp_config()
-        return f"{config['app_base_url']}/api/tenants/auth/verify-email?email={email}&token={token}"
+        base_url = os.getenv("FRONTEND_BASE_URL", "http://home.local.suranku")
+        return f"{base_url}/verify-email?email={email}&token={token}"
 
     async def cleanup_expired_tokens(self, db: Session) -> int:
         """

@@ -16,6 +16,8 @@ class Invitation(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True)
+    organization_hostname = Column(String(255), nullable=True)
     email = Column(String(255), nullable=False, index=True)
     app_roles = Column(JSON, nullable=False)
     invited_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -187,6 +189,90 @@ class TenantApiKey(Base):
         Index('idx_api_key_expires', 'expires_at'),
     )
 
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    slug = Column(String(255), nullable=False, unique=True, index=True)
+    description = Column(Text, nullable=True)
+
+    dns_subdomain = Column(String(255), nullable=False, unique=True, index=True)
+    dns_zone = Column(String(255), nullable=True)
+    dns_hostname = Column(String(255), nullable=True)
+    dns_status = Column(String(50), default="pending", index=True)
+
+    status = Column(String(50), default="active", index=True)
+    is_default = Column(Boolean, default=False, index=True)
+    created_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)
+
+    apps = relationship(
+        "OrganizationAppAccess",
+        back_populates="organization",
+        cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index('idx_org_tenant_status', 'tenant_id', 'status'),
+    )
+
+class OrganizationAppAccess(Base):
+    __tablename__ = "organization_app_access"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    app_name = Column(String(50), nullable=False, index=True)
+
+    is_enabled = Column(Boolean, default=False, index=True)
+    ingress_path = Column(String(255), nullable=True)
+    ingress_hostname = Column(String(255), nullable=True)
+    provisioning_state = Column(String(50), default="not_started", index=True)
+    dns_status = Column(String(50), default="pending", index=True)
+    provisioning_error = Column(Text, nullable=True)
+    last_synced_at = Column(DateTime, nullable=True)
+    enabled_at = Column(DateTime, nullable=True)
+    disabled_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    organization = relationship("Organization", back_populates="apps")
+
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'app_name', name='uix_org_app_name'),
+        Index('idx_org_app_enabled', 'organization_id', 'app_name', 'is_enabled'),
+    )
+
+class OrganizationUserRole(Base):
+    __tablename__ = "organization_user_roles"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    app_name = Column(String(50), nullable=False, index=True)
+    roles = Column(JSON, default=list)
+
+    granted_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    granted_via = Column(String(50), default="manual")  # manual, invitation, ad_sync, system
+    metadata_json = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'user_id', 'app_name', name='uix_org_user_app'),
+        Index('idx_org_user_roles_user', 'tenant_id', 'organization_id', 'user_id'),
+    )
+
 class PasswordResetToken(Base):
     __tablename__ = "password_reset_tokens"
 
@@ -285,19 +371,21 @@ class TenantLDAPConfig(Base):
     __tablename__ = "tenant_ldap_configs"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     enabled = Column(Boolean, default=False, index=True)
+    provider_type = Column(String(50), default='ldap', nullable=False, index=True)
 
     # LDAP Server Configuration
-    connection_url = Column(String(500), nullable=False)  # ldap://ad.company.com:389
-    bind_dn = Column(String(500), nullable=False)  # CN=admin,DC=company,DC=com
+    connection_url = Column(String(500), nullable=True)  # ldap://ad.company.com:389 or Graph base URL
+    bind_dn = Column(String(500), nullable=True)  # CN=admin,DC=company,DC=com
     # NOTE: bind_credential is stored in Vault (service="ldap", key_name="credentials"), NOT in database
     connection_timeout = Column(Integer, default=30)
     read_timeout = Column(Integer, default=30)
     use_truststore_spi = Column(String(50), default='ldapsOnly')
 
     # User Search Configuration
-    users_dn = Column(String(500), nullable=False)  # OU=Users,DC=company,DC=com
+    users_dn = Column(String(500), nullable=True)  # OU=Users,DC=company,DC=com
     user_object_class = Column(String(100), default='person')
     username_ldap_attribute = Column(String(100), default='sAMAccountName')
     rdn_ldap_attribute = Column(String(100), default='cn')
@@ -316,6 +404,10 @@ class TenantLDAPConfig(Base):
     group_name_ldap_attribute = Column(String(100), default='cn')
     group_membership_attribute = Column(String(100), default='member')
     group_membership_type = Column(String(20), default='DN')  # DN or UID
+
+    # Azure Entra Graph configuration
+    graph_tenant_id = Column(String(100), nullable=True)
+    graph_client_id = Column(String(100), nullable=True)
 
     # Sync Settings
     sync_registrations = Column(Boolean, default=True)  # Allow new user registration from LDAP
@@ -346,10 +438,13 @@ class TenantLDAPConfig(Base):
 
     # Constraints and indexes
     __table_args__ = (
+        UniqueConstraint('tenant_id', 'organization_id', name='uix_ldap_tenant_org'),
         Index('idx_ldap_config_tenant', 'tenant_id'),
         Index('idx_ldap_config_enabled', 'enabled'),
         Index('idx_ldap_config_keycloak', 'keycloak_federation_id'),
         Index('idx_ldap_config_last_sync', 'last_sync_at'),
+        Index('idx_ldap_config_org', 'organization_id'),
+        Index('idx_ldap_provider_type', 'provider_type'),
     )
 
 class TenantLDAPSyncHistory(Base):
@@ -360,6 +455,7 @@ class TenantLDAPSyncHistory(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
     ldap_config_id = Column(String(36), ForeignKey("tenant_ldap_configs.id", ondelete="CASCADE"), nullable=False, index=True)
 
     # Sync metadata
@@ -392,6 +488,7 @@ class TenantLDAPSyncHistory(Base):
     __table_args__ = (
         Index('idx_ldap_sync_tenant', 'tenant_id'),
         Index('idx_ldap_sync_config', 'ldap_config_id'),
+        Index('idx_ldap_sync_org', 'organization_id'),
         Index('idx_ldap_sync_started', 'started_at'),
         Index('idx_ldap_sync_status', 'sync_status'),
         Index('idx_ldap_sync_type', 'sync_type'),

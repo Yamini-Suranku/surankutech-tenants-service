@@ -13,10 +13,11 @@ import uuid
 from shared.database import get_db
 from shared.auth import verify_token, require_tenant_access, TokenData
 from shared.models import User, UserTenant, TenantAppAccess, AuditLog
-from models import Invitation, SocialAccount
+from models import Invitation, SocialAccount, Organization
+from modules.organization_management import DEFAULT_DNS_ZONE
 from schemas import (
     UserInviteRequest, InvitationResponse, UserResponse, UserUpdateRequest,
-    UserListResponse, PaginationInfo, InvitationAcceptRequest
+    UserListResponse, PaginationInfo, InvitationAcceptRequest, InvitationResendRequest
 )
 from typing import List, Optional
 from pydantic import BaseModel
@@ -25,6 +26,26 @@ logger = logging.getLogger(__name__)
 
 # Create router for user management endpoints
 router = APIRouter(tags=["user-management"])
+
+def _normalize_hostname(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    host = value.strip()
+    if host.startswith("https://"):
+        host = host[len("https://"):]
+    elif host.startswith("http://"):
+        host = host[len("http://"):]
+    return host.strip().strip("/")
+
+def _derive_org_hostname(org: Organization) -> Optional[str]:
+    if org.dns_hostname:
+        return org.dns_hostname
+    zone = org.dns_zone or DEFAULT_DNS_ZONE
+    if org.dns_subdomain:
+        return f"{org.dns_subdomain}.{zone}"
+    if org.slug:
+        return f"{org.slug}.{zone}"
+    return None
 
 @router.get("/tenants/{tenant_id}/users", response_model=UserListResponse)
 async def list_tenant_users(
@@ -157,6 +178,22 @@ async def invite_user(
     if not is_admin:
         raise HTTPException(status_code=403, detail="Admin role required to invite users")
 
+    target_org = None
+    org_hostname = _normalize_hostname(request.organization_hostname)
+    if request.organization_id:
+        target_org = db.query(Organization).filter(
+            Organization.id == request.organization_id,
+            Organization.tenant_id == tenant_id,
+            Organization.deleted_at.is_(None)
+        ).first()
+        if not target_org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        if not org_hostname:
+            org_hostname = _derive_org_hostname(target_org)
+    elif org_hostname:
+        # Host provided without org ID; accept but log
+        logger.info("Invitation includes hostname without organization_id: %s", org_hostname)
+
     # Validate app roles and check limits
     for app_name, roles in request.app_roles.items():
         if app_name not in ["darkhole", "darkfolio", "confiploy"]:
@@ -204,6 +241,10 @@ async def invite_user(
             existing_invitation.resent_count = (existing_invitation.resent_count or 0) + 1
             existing_invitation.last_sent_at = datetime.utcnow()
             existing_invitation.updated_at = datetime.utcnow()
+            if target_org or request.organization_id:
+                existing_invitation.organization_id = target_org.id if target_org else request.organization_id
+            if org_hostname:
+                existing_invitation.organization_hostname = org_hostname
             invitation = existing_invitation
             logger.info(f"Resending invitation for {request.email} (attempt #{invitation.resent_count})")
         else:
@@ -220,7 +261,9 @@ async def invite_user(
             app_roles=request.app_roles,
             invited_by=current_user.id,
             expires_at=datetime.utcnow() + timedelta(days=7),
-            status="pending"
+            status="pending",
+            organization_id=target_org.id if target_org else request.organization_id,
+            organization_hostname=org_hostname
         )
         db.add(invitation)
         logger.info(f"Created new invitation for {request.email}")
@@ -257,7 +300,9 @@ async def invite_user(
         created_at=invitation.created_at,
         invited_by=invitation.invited_by,
         resent_count=invitation.resent_count or 0,
-        last_sent_at=invitation.last_sent_at or invitation.created_at
+        last_sent_at=invitation.last_sent_at or invitation.created_at,
+        organization_id=invitation.organization_id,
+        organization_hostname=invitation.organization_hostname,
     )
 
 @router.put("/tenants/users/{user_id}", response_model=UserResponse)
@@ -678,7 +723,9 @@ async def list_tenant_invitations(
             created_at=inv.created_at,
             invited_by=inv.invited_by,
             resent_count=inv.resent_count or 0,
-            last_sent_at=inv.last_sent_at or inv.created_at
+            last_sent_at=inv.last_sent_at or inv.created_at,
+            organization_id=inv.organization_id,
+            organization_hostname=inv.organization_hostname,
         )
         for inv in invitations
     ]
@@ -686,6 +733,7 @@ async def list_tenant_invitations(
 @router.post("/tenants/invitations/{invitation_id}/resend")
 async def resend_invitation(
     invitation_id: str,
+    request: InvitationResendRequest | None = None,
     token: str = Depends(HTTPBearer()),
     db: Session = Depends(get_db)
 ):
@@ -712,6 +760,8 @@ async def resend_invitation(
         if not user_tenant:
             raise HTTPException(status_code=403, detail="Access denied to tenant")
 
+        login_url = _build_login_url(invitation)
+
         # Check if invitation is still valid
         if invitation.status != "pending":
             raise HTTPException(
@@ -722,6 +772,32 @@ async def resend_invitation(
         # Check if invitation has expired
         if invitation.expires_at and datetime.utcnow() > invitation.expires_at:
             raise HTTPException(status_code=400, detail="Invitation has expired")
+
+        # Allow updating organization context when resending
+        target_org = None
+        if request and request.organization_id:
+            target_org = db.query(Organization).filter(
+                Organization.id == request.organization_id,
+                Organization.tenant_id == invitation.tenant_id,
+                Organization.deleted_at.is_(None)
+            ).first()
+            if not target_org:
+                raise HTTPException(status_code=404, detail="Organization not found for invitation")
+            invitation.organization_id = target_org.id
+            invitation.organization_hostname = _derive_org_hostname(target_org)
+
+        if request and request.organization_hostname:
+            normalized_host = _normalize_hostname(request.organization_hostname)
+            if normalized_host:
+                invitation.organization_hostname = normalized_host
+
+        if invitation.organization_id and not invitation.organization_hostname:
+            org = db.query(Organization).filter(
+                Organization.id == invitation.organization_id,
+                Organization.tenant_id == invitation.tenant_id
+            ).first()
+            if org:
+                invitation.organization_hostname = _derive_org_hostname(org)
 
         # Update invitation with resend info
         invitation.resent_count = (invitation.resent_count or 0) + 1
@@ -1014,7 +1090,9 @@ async def get_invitation_info(
             "inviter_name": f"{inviter.first_name} {inviter.last_name}" if inviter else "Admin",
             "app_roles": invitation.app_roles,
             "expires_at": invitation.expires_at.isoformat() if invitation.expires_at else None,
-            "message": "Invitation is valid and ready to accept"
+            "message": "Invitation is valid and ready to accept",
+            "organization_hostname": invitation.organization_hostname,
+            "login_url": _build_login_url(invitation),
         }
 
     except HTTPException:
@@ -1066,7 +1144,7 @@ async def accept_invitation(
                 return {
                     "status": "already_member",
                     "message": "You are already a member of this organization",
-                    "redirect_url": "/login"
+                    "redirect_url": login_url
                 }
             else:
                 # Add existing user to tenant
@@ -1165,3 +1243,11 @@ async def accept_invitation(
         db.rollback()
         logger.error(f"Error accepting invitation {invitation_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to accept invitation: {str(e)}")
+def _build_login_url(invitation: Invitation) -> str:
+    host = invitation.organization_hostname
+    if host:
+        host = host.strip().rstrip("/")
+        if not host.startswith("http://") and not host.startswith("https://"):
+            host = f"https://{host}"
+        return f"{host}/darkhole/pages/login.html"
+    return "/vanilla/pages/login.html"

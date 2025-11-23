@@ -14,8 +14,20 @@ from typing import Optional, List
 
 from shared.database import get_db
 from shared.auth import verify_token, require_tenant_access, TokenData, get_current_token_data
-from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog
-from models import TenantSettings
+from shared.models import (
+    Tenant,
+    User,
+    UserTenant,
+    TenantAppAccess,
+    AuditLog,
+    FeatureFlag,
+)
+from models import (
+    TenantSettings,
+    Invitation,
+    Organization,
+    OrganizationAppAccess,
+)
 from schemas import (
     TenantCreateRequest, TenantResponse, UserResponse,
     TenantUpdateRequest, AppAccessResponse,
@@ -69,6 +81,7 @@ RESERVED_SUBDOMAINS = {
 }
 
 PROVISIONING_READY_STATES = {"ready", "active", "synced"}
+TENANT_ADMIN_ROLES = {"admin", "administrator", "owner", "tenant_admin"}
 
 def slugify(value: str) -> str:
     value = value.lower()
@@ -156,6 +169,54 @@ def seed_app_access_metadata(app_access: TenantAppAccess, tenant: Tenant, app_na
     app_access.provisioning_error = None
     app_access.last_synced_at = None
 
+def user_has_tenant_admin(user_tenant: Optional[UserTenant]) -> bool:
+    if not user_tenant or not user_tenant.app_roles:
+        return False
+    for roles in user_tenant.app_roles.values():
+        if any(role in TENANT_ADMIN_ROLES for role in roles):
+            return True
+    return False
+
+def delete_tenant_records(
+    db: Session,
+    tenant_id: str,
+    requested_by: Optional[str] = None,
+) -> None:
+    """Remove tenant and all dependent records."""
+    db.query(OrganizationAppAccess).filter(
+        OrganizationAppAccess.tenant_id == tenant_id
+    ).delete(synchronize_session=False)
+
+    db.query(Organization).filter(
+        Organization.tenant_id == tenant_id
+    ).delete(synchronize_session=False)
+
+    db.query(TenantAppAccess).filter(
+        TenantAppAccess.tenant_id == tenant_id
+    ).delete(synchronize_session=False)
+
+    db.query(TenantSettings).filter(
+        TenantSettings.tenant_id == tenant_id
+    ).delete(synchronize_session=False)
+
+    db.query(FeatureFlag).filter(
+        FeatureFlag.tenant_id == tenant_id
+    ).delete(synchronize_session=False)
+
+    db.query(Invitation).filter(
+        Invitation.tenant_id == tenant_id
+    ).delete(synchronize_session=False)
+
+    db.query(UserTenant).filter(
+        UserTenant.tenant_id == tenant_id
+    ).delete(synchronize_session=False)
+
+    db.query(AuditLog).filter(
+        AuditLog.tenant_id == tenant_id
+    ).delete(synchronize_session=False)
+
+    db.query(Tenant).filter(Tenant.id == tenant_id).delete(synchronize_session=False)
+
 def mark_app_for_enable(app_access: TenantAppAccess, tenant: Tenant, app_name: str):
     network_tier = determine_network_tier(tenant.plan_id)
     app_access.network_tier = network_tier
@@ -196,7 +257,10 @@ async def notify_app_enabled(
     tenant: Tenant,
     app_access: TenantAppAccess,
     requested_by: Optional[str],
-    org_id: str = "default"
+    org_id: str = "default",
+    org_hostname: Optional[str] = None,
+    org_dns_subdomain: Optional[str] = None,
+    org_dns_zone: Optional[str] = None,
 ) -> None:
     await emit_app_enabled_event(
         tenant_id=tenant.id,
@@ -204,6 +268,9 @@ async def notify_app_enabled(
         plan_id=tenant.plan_id,
         app_name=app_access.app_name,
         org_id=org_id,
+        org_hostname=org_hostname,
+        org_dns_subdomain=org_dns_subdomain,
+        org_dns_zone=org_dns_zone,
         ingress_hostname=app_access.ingress_hostname,
         network_tier=app_access.network_tier,
         provisioning_state=app_access.provisioning_state,
@@ -214,13 +281,19 @@ async def notify_app_disabled(
     tenant: Tenant,
     app_name: str,
     requested_by: Optional[str],
-    org_id: str = "default"
+    org_id: str = "default",
+    org_hostname: Optional[str] = None,
+    org_dns_subdomain: Optional[str] = None,
+    org_dns_zone: Optional[str] = None,
 ) -> None:
     await emit_app_disabled_event(
         tenant_id=tenant.id,
         app_name=app_name,
         org_id=org_id,
         requested_by=requested_by,
+        org_hostname=org_hostname,
+        org_dns_subdomain=org_dns_subdomain,
+        org_dns_zone=org_dns_zone,
     )
 
 def get_or_create_user_from_token(db: Session, token_data: TokenData) -> User:
@@ -234,6 +307,30 @@ def get_or_create_user_from_token(db: Session, token_data: TokenData) -> User:
     if not user:
         raise HTTPException(status_code=404, detail="User not found in tenant service")
     return user
+
+
+@router.get("/tenants", response_model=TenantListResponse)
+async def list_user_tenants(
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db)
+):
+    """Return the list of tenants the authenticated user has access to."""
+    user = get_or_create_user_from_token(db, token_data)
+
+    user_tenants = db.query(UserTenant).filter(
+        UserTenant.user_id == user.id,
+        UserTenant.status != "removed"
+    ).all()
+
+    if not user_tenants:
+        return TenantListResponse(tenants=[])
+
+    summaries = [
+        build_tenant_summary(ut.tenant, ut, db)
+        for ut in user_tenants if ut.tenant is not None
+    ]
+
+    return TenantListResponse(tenants=summaries)
 
 def build_app_summary(app_name: str, access: Optional[TenantAppAccess]) -> TenantAppSummary:
     metadata = APP_CATALOG.get(app_name, {})
@@ -924,6 +1021,43 @@ async def quick_create_tenant(
         company_size=request.company_size,
         industry=request.industry
     )
+
+
+@router.delete("/tenants/{tenant_id}")
+async def delete_tenant_account(
+    tenant_id: str,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db)
+):
+    """Delete a tenant and all associated data."""
+    user = get_or_create_user_from_token(db, token_data)
+    user_tenant = db.query(UserTenant).filter(
+        UserTenant.user_id == user.id,
+        UserTenant.tenant_id == tenant_id
+    ).first()
+
+    if not user_tenant:
+        raise HTTPException(status_code=403, detail="Access denied to tenant")
+
+    if not user_has_tenant_admin(user_tenant):
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator access is required to delete a tenant"
+        )
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    tenant_name = tenant.name
+    delete_tenant_records(db, tenant_id, requested_by=user.email)
+    db.commit()
+
+    return {
+        "status": "deleted",
+        "tenant_id": tenant_id,
+        "message": f"Tenant '{tenant_name}' and all related data have been deleted."
+    }
 
 def get_trial_features(app_name: str) -> list[str]:
     """Get trial features for each app (all features unlocked during trial)"""

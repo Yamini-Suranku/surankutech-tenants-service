@@ -152,6 +152,13 @@ class InvitationEmailService(BaseEmailService):
         """
         invitation = kwargs['invitation']
         config = self._get_smtp_config()
+        if invitation.organization_hostname:
+            host = invitation.organization_hostname.strip()
+            if host.startswith("http://") or host.startswith("https://"):
+                base = host.rstrip("/")
+            else:
+                base = f"https://{host}".rstrip("/")
+            return f"{base}/darkhole/pages/accept-invitation.html?invitation_id={invitation.id}"
         return f"{config['app_base_url']}/vanilla/pages/accept-invitation.html?invitation_id={invitation.id}"
 
     def _format_app_roles(self, app_roles: dict) -> str:

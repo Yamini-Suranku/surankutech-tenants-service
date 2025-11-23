@@ -31,9 +31,12 @@ spec:
       serviceAccountName: tenant-services-sa
       containers:
       - name: provisioning-worker
-        image: surankutech-tenants-service:v2.26
+        image: surankutech-tenants-service:v2.72
+        workingDir: /app
         command: ["python3", "-m", "workers.provisioning_worker"]
         env:
+        - name: PYTHONPATH
+          value: /app
         - name: ENVIRONMENT
           valueFrom:
             configMapKeyRef:
@@ -94,6 +97,16 @@ spec:
               key: provisioning-worker-enable
         - name: PROVISIONING_CONSUMER_GROUP
           value: "tenants-provisioner"
+        - name: PROVISIONING_SHARED_NAMESPACE
+          value: "shared-services"
+        - name: PROVISIONING_SHARED_SERVICE
+          value: "suranku-minio"
+        - name: PROVISIONING_SHARED_SERVICE_PORT
+          value: "9000"
+        - name: PROVISIONING_SHARED_STATIC_MODE
+          value: "true"
+        - name: PROVISIONING_STATIC_APPS_PREFIX
+          value: "/platform-apps/apps"
         # DNS configuration for domain provisioning
         - name: LOCAL_DATA_PLANE_DOMAIN
           value: "local.suranku"
@@ -113,7 +126,7 @@ spec:
         resources:
           requests:
             memory: "128Mi"
-            cpu: "50m"
+            cpu: "51m"
           limits:
             memory: "256Mi"
             cpu: "200m"

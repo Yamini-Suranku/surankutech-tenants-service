@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, EmailStr, validator
+from pydantic import BaseModel, Field, EmailStr, validator, root_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -90,6 +90,39 @@ class TenantSettingsUpdateRequest(BaseModel):
     api_rate_limits: Optional[Dict[str, Any]] = None
     audit_log_retention_days: Optional[int] = Field(None, ge=30, le=365)
 
+# ===== ORGANIZATION SCHEMAS =====
+
+class OrganizationCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=255)
+    desired_subdomain: str = Field(..., min_length=3, max_length=63)
+    description: Optional[str] = Field(None, max_length=1000)
+    dns_zone: Optional[str] = Field(None, max_length=255, description="DNS zone or domain suffix (e.g., local.suranku)")
+
+class OrganizationDNSRequest(BaseModel):
+    desired_subdomain: str = Field(..., min_length=3, max_length=63)
+    dns_zone: Optional[str] = Field(None, max_length=255)
+
+class OrganizationResponse(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    slug: str
+    description: Optional[str] = None
+    dns_subdomain: str
+    dns_zone: Optional[str] = None
+    dns_hostname: Optional[str] = None
+    dns_status: str
+    status: str
+    is_default: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class OrganizationListResponse(BaseModel):
+    organizations: List[OrganizationResponse]
+
 # ===== USER SCHEMAS =====
 
 class UserResponse(BaseModel):
@@ -111,6 +144,8 @@ class UserInviteRequest(BaseModel):
     email: EmailStr
     app_roles: Dict[str, List[str]] = Field(..., description="App-specific roles")
     message: Optional[str] = Field(None, max_length=500)
+    organization_id: Optional[str] = Field(None, description="Target organization for this invitation")
+    organization_hostname: Optional[str] = Field(None, description="DNS hostname for the organization invitation link")
 
     @validator('app_roles')
     def validate_app_roles(cls, v):
@@ -165,6 +200,8 @@ class InvitationResponse(BaseModel):
     invited_by: str
     resent_count: int
     last_sent_at: datetime
+    organization_id: Optional[str] = None
+    organization_hostname: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -176,8 +213,9 @@ class InvitationAcceptRequest(BaseModel):
     last_name: str = Field(..., min_length=1, max_length=50)
 
 class InvitationResendRequest(BaseModel):
-    invitation_id: str
     message: Optional[str] = Field(None, max_length=500)
+    organization_id: Optional[str] = Field(None, description="Target organization for this resend")
+    organization_hostname: Optional[str] = Field(None, description="DNS hostname override for invitation link")
 
 # ===== AUTH SCHEMAS =====
 
@@ -443,18 +481,41 @@ class TenantAnalyticsResponse(BaseModel):
 
 # ===== LDAP CONFIGURATION SCHEMAS =====
 
+DIRECTORY_PROVIDER_ALIASES = {
+    "ldap": "ldap",
+    "active_directory": "ldap",
+    "azure_ad": "ldap",
+    "azure_ad_graph": "azure_ad_graph",
+    "entra_graph": "azure_ad_graph",
+    "graph": "azure_ad_graph",
+}
+
+
+def normalize_directory_provider(value: Optional[str]) -> str:
+    if not value:
+        return "ldap"
+    normalized = DIRECTORY_PROVIDER_ALIASES.get(value.strip().lower())
+    if not normalized:
+        raise ValueError("Unsupported directory provider")
+    return normalized
+
 class LDAPConfigCreateRequest(BaseModel):
     """Request schema for creating LDAP configuration"""
+    organization_id: Optional[str] = Field(
+        None, description="Optional organization scope (per-org directory configuration)"
+    )
+    provider_type: Optional[str] = Field("ldap", description="Directory provider type (ldap or entra_graph)")
+
     # LDAP Server Configuration
-    connection_url: str = Field(..., max_length=500, description="LDAP server URL (e.g., ldap://ad.company.com:389)")
-    bind_dn: str = Field(..., max_length=500, description="Bind DN for LDAP authentication")
-    bind_credential: str = Field(..., min_length=1, description="Bind password (will be encrypted)")
+    connection_url: Optional[str] = Field(None, max_length=500, description="LDAP server URL (e.g., ldap://ad.company.com:389)")
+    bind_dn: Optional[str] = Field(None, max_length=500, description="Bind DN for LDAP authentication")
+    bind_credential: Optional[str] = Field(None, min_length=1, description="Bind password (will be encrypted)")
     connection_timeout: Optional[int] = Field(30, ge=5, le=300, description="Connection timeout in seconds")
     read_timeout: Optional[int] = Field(30, ge=5, le=300, description="Read timeout in seconds")
     use_truststore_spi: Optional[str] = Field("ldapsOnly", max_length=50)
 
     # User Search Configuration
-    users_dn: str = Field(..., max_length=500, description="Base DN for user search (e.g., OU=Users,DC=company,DC=com)")
+    users_dn: Optional[str] = Field(None, max_length=500, description="Base DN for user search (e.g., OU=Users,DC=company,DC=com)")
     user_object_class: Optional[str] = Field("person", max_length=100)
     username_ldap_attribute: Optional[str] = Field("sAMAccountName", max_length=100)
     rdn_ldap_attribute: Optional[str] = Field("cn", max_length=100)
@@ -487,8 +548,45 @@ class LDAPConfigCreateRequest(BaseModel):
 
     enabled: Optional[bool] = Field(False, description="Enable LDAP sync")
 
+    # Azure Entra Graph (Microsoft Graph) configuration
+    graph_tenant_id: Optional[str] = Field(None, max_length=100, description="Azure tenant/directory ID")
+    graph_client_id: Optional[str] = Field(None, max_length=100, description="App registration (client) ID")
+    graph_client_secret: Optional[str] = Field(None, min_length=8, description="Client secret for Microsoft Graph app")
+
+    @validator("provider_type", pre=True, always=True)
+    def normalize_provider(cls, value):
+        return normalize_directory_provider(value)
+
+    @root_validator
+    def validate_provider_requirements(cls, values):
+        provider = values.get("provider_type", "ldap")
+        if provider == "ldap":
+            required_fields = {
+                "connection_url": "LDAP server URL",
+                "bind_dn": "LDAP bind DN",
+                "bind_credential": "LDAP bind credential",
+                "users_dn": "User search base DN",
+            }
+            for field_name, label in required_fields.items():
+                if not values.get(field_name):
+                    raise ValueError(f"{label} is required for LDAP provider")
+        else:
+            graph_required = {
+                "graph_tenant_id": "Azure tenant ID",
+                "graph_client_id": "Azure client ID",
+                "graph_client_secret": "Azure client secret",
+            }
+            for field_name, label in graph_required.items():
+                if not values.get(field_name):
+                    raise ValueError(f"{label} is required for Azure Entra ID")
+        return values
+
 class LDAPConfigUpdateRequest(BaseModel):
     """Request schema for updating LDAP configuration"""
+    organization_id: Optional[str] = Field(
+        None, description="Organization scope for this configuration (use query param when updating existing configs)"
+    )
+    provider_type: Optional[str] = Field(None, description="Directory provider type (ldap or entra_graph)")
     connection_url: Optional[str] = Field(None, max_length=500)
     bind_dn: Optional[str] = Field(None, max_length=500)
     bind_credential: Optional[str] = Field(None, min_length=1)
@@ -524,23 +622,34 @@ class LDAPConfigUpdateRequest(BaseModel):
     batch_size: Optional[int] = Field(None, ge=100, le=10000)
 
     enabled: Optional[bool] = None
+    graph_tenant_id: Optional[str] = Field(None, max_length=100)
+    graph_client_id: Optional[str] = Field(None, max_length=100)
+    graph_client_secret: Optional[str] = Field(None, min_length=8)
+
+    @validator("provider_type", pre=True, always=True)
+    def normalize_optional_provider(cls, value):
+        if value is None:
+            return value
+        return normalize_directory_provider(value)
 
 class LDAPConfigResponse(BaseModel):
     """Response schema for LDAP configuration (credentials stored in Vault, not returned)"""
     id: str
     tenant_id: str
+    organization_id: Optional[str]
     enabled: bool
+    provider_type: str
 
     # LDAP Server Configuration
-    connection_url: str
-    bind_dn: str
+    connection_url: Optional[str]
+    bind_dn: Optional[str]
     # NOTE: bind_credential is stored in Vault and never returned in API responses
     connection_timeout: int
     read_timeout: int
     use_truststore_spi: str
 
     # User Search Configuration
-    users_dn: str
+    users_dn: Optional[str]
     user_object_class: str
     username_ldap_attribute: str
     rdn_ldap_attribute: str
@@ -571,6 +680,10 @@ class LDAPConfigResponse(BaseModel):
     changed_sync_period: int
     batch_size: int
 
+    # Azure Entra Graph metadata
+    graph_tenant_id: Optional[str]
+    graph_client_id: Optional[str]
+
     # Sync Status
     last_sync_at: Optional[datetime]
     last_sync_status: Optional[str]
@@ -592,10 +705,39 @@ class LDAPConfigResponse(BaseModel):
 
 class LDAPTestConnectionRequest(BaseModel):
     """Request to test LDAP connection"""
-    connection_url: str = Field(..., max_length=500)
-    bind_dn: str = Field(..., max_length=500)
-    bind_credential: str = Field(..., min_length=1)
+    provider_type: Optional[str] = Field("ldap", description="Directory provider type when testing connectivity")
+    connection_url: Optional[str] = Field(None, max_length=500)
+    bind_dn: Optional[str] = Field(None, max_length=500)
+    bind_credential: Optional[str] = Field(None, min_length=1)
     connection_timeout: Optional[int] = Field(30, ge=5, le=300)
+    graph_tenant_id: Optional[str] = Field(None, max_length=100)
+    graph_client_id: Optional[str] = Field(None, max_length=100)
+    graph_client_secret: Optional[str] = Field(None, min_length=8)
+
+    @validator("provider_type", pre=True, always=True)
+    def normalize_test_provider(cls, value):
+        return normalize_directory_provider(value)
+
+    @root_validator
+    def validate_test_fields(cls, values):
+        provider = values.get("provider_type", "ldap")
+        if provider == "ldap":
+            required = {
+                "connection_url": "LDAP server URL",
+                "bind_dn": "LDAP bind DN",
+                "bind_credential": "LDAP bind credential"
+            }
+        else:
+            required = {
+                "graph_tenant_id": "Azure tenant ID",
+                "graph_client_id": "Azure client ID",
+                "graph_client_secret": "Azure client secret"
+            }
+
+        for field, label in required.items():
+            if not values.get(field):
+                raise ValueError(f"{label} is required for {provider.upper()} test")
+        return values
 
 class LDAPTestConnectionResponse(BaseModel):
     """Response from LDAP connection test"""
@@ -624,6 +766,7 @@ class LDAPSyncHistoryResponse(BaseModel):
     """LDAP sync history entry"""
     id: str
     tenant_id: str
+    organization_id: Optional[str]
     ldap_config_id: str
     sync_type: str
     sync_status: str

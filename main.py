@@ -12,6 +12,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # Import all module routers
 from modules.tenant_management import router as tenant_router
 from modules.organization_management import router as org_router
+from modules.organization_roles import router as org_roles_router
 from modules.authentication import router as auth_router
 from modules.email_verification import router as email_router
 from modules.user_management import router as user_router
@@ -21,6 +22,7 @@ from modules.file_upload import router as upload_router
 from modules.admin_info import router as admin_router
 from modules.operator_integration import router as operator_router
 from modules.ldap_management import router as ldap_router
+from modules.darkhole_proxy import router as darkhole_proxy_router
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -70,6 +72,7 @@ async def health_check():
 # Include all module routers
 app.include_router(tenant_router)           # /tenants/*
 app.include_router(org_router)              # /tenants/{id}/orgs/* and /orgs/* (organization management)
+app.include_router(org_roles_router)        # /tenants/{id}/orgs/{id}/roles/*
 app.include_router(user_router)             # /tenants/{id}/users, etc. (must come after org_router to avoid conflicts)
 app.include_router(auth_router)             # /auth/*
 app.include_router(email_router)            # /auth/verify-email, etc.
@@ -79,6 +82,7 @@ app.include_router(upload_router)  # File upload routes (Kong strips /api/upload
 app.include_router(admin_router)            # /admin/* (platform administration)
 app.include_router(operator_router)         # /operator/* (Kubernetes operator integration)
 app.include_router(ldap_router)             # /tenants/{id}/ldap/* (LDAP/AD sync)
+app.include_router(darkhole_proxy_router)   # /tenants/{id}/orgs/{id}/apps/darkhole/*
 
 # Legacy auth endpoint support for backward compatibility
 @app.post("/api/tenants/auth/login")

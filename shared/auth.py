@@ -4,6 +4,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import requests
 from typing import Optional, Dict, List
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,10 @@ class TokenData:
         self.plan = token_data.get("plan", "free")
         self.trial_expires = token_data.get("trial_expires")
         self.groups = token_data.get("groups", [])
+
+        # Enhanced organization support for multi-tenant isolation
+        self.current_org = token_data.get("current_org", {})
+        self.org_memberships = token_data.get("org_memberships", [])
 
 async def verify_token(token: str) -> Optional[TokenData]:
     """Verify JWT token with Keycloak and return user data"""
@@ -89,6 +94,132 @@ async def verify_token(token: str) -> Optional[TokenData]:
             detail="Authentication service unavailable"
         )
 
+# ========== HOSTNAME AND ORGANIZATION UTILITIES ==========
+
+def extract_subdomain_from_hostname(hostname: str) -> Optional[str]:
+    """
+    Extract organization slug from hostname for DNS-based org resolution.
+
+    Supported patterns:
+    - acme.darkhole.suranku.net -> "acme"
+    - dnstest.darkhole.suranku.net -> "dnstest"
+    - acme.darkhole.local.suranku -> "acme" (development)
+    - darkhole.suranku.net -> None (no org subdomain)
+
+    Args:
+        hostname: The hostname from request headers
+
+    Returns:
+        Organization slug if found, None otherwise
+    """
+    if not hostname:
+        return None
+
+    # Remove port if present
+    hostname = hostname.split(':')[0].lower()
+
+    # Patterns for org subdomain extraction
+    patterns = [
+        r"^([a-z0-9\-]+)\.darkhole\.suranku\.(net|com)$",          # Production
+        r"^([a-z0-9\-]+)\.darkhole\.local\.suranku$",             # Development
+        r"^([a-z0-9\-]+)\.darkfolio\.suranku\.(net|com)$",        # Darkfolio app
+        r"^([a-z0-9\-]+)\.confiploy\.suranku\.(net|com)$",        # Confiploy app
+    ]
+
+    for pattern in patterns:
+        match = re.match(pattern, hostname)
+        if match:
+            org_slug = match.group(1)
+            # Skip shared/common subdomains
+            if org_slug not in ['shared', 'api', 'www', 'admin', 'status']:
+                logger.info(f"📍 Extracted org slug '{org_slug}' from hostname '{hostname}'")
+                return org_slug
+
+    logger.debug(f"🔍 No org slug found in hostname '{hostname}'")
+    return None
+
+def require_org_app_role(token_data: TokenData, hostname: str, app_client: str, required_role: str) -> bool:
+    """
+    Check if user has specific role in app for the organization determined by hostname.
+
+    This is the enhanced version that provides proper organization-level isolation
+    to prevent cross-org access vulnerabilities.
+
+    Args:
+        token_data: Validated JWT token data
+        hostname: Request hostname (e.g., "acme.darkhole.suranku.net")
+        app_client: App client name (e.g., "darkhole", "darkfolio")
+        required_role: Required role (e.g., "admin", "consumer")
+
+    Returns:
+        True if user has the required role for this org's app, False otherwise
+
+    Raises:
+        HTTPException: If user has no access to the organization
+    """
+    logger.info(f"🔐 ORG ROLE CHECK: hostname={hostname}, app={app_client}, role={required_role}")
+    logger.info(f"👤 User: {getattr(token_data, 'email', 'unknown')}")
+
+    # Extract organization slug from hostname
+    org_slug = extract_subdomain_from_hostname(hostname)
+    if not org_slug:
+        logger.warning(f"⚠️ No org slug in hostname '{hostname}', falling back to legacy validation")
+        # Fallback to legacy role checking for domains without org subdomains
+        return require_app_role(token_data, app_client, required_role)
+
+    logger.info(f"🏢 Target organization: {org_slug}")
+
+    # Check if token has org memberships (future enhancement)
+    org_memberships = getattr(token_data, 'org_memberships', [])
+    if org_memberships:
+        logger.info(f"📋 User org memberships: {[m.get('org_slug') for m in org_memberships]}")
+
+        # Find matching organization membership
+        for org_membership in org_memberships:
+            if org_membership.get('org_slug') == org_slug:
+                org_app_roles = org_membership.get('app_roles', {}).get(app_client, [])
+                logger.info(f"🎯 User roles in {org_slug}.{app_client}: {org_app_roles}")
+
+                if required_role in org_app_roles:
+                    logger.info(f"✅ Access granted: {required_role} found in org-specific roles")
+                    return True
+                else:
+                    logger.warning(f"❌ Access denied: {required_role} not in org-specific roles {org_app_roles}")
+                    return False
+
+        logger.warning(f"❌ Access denied: User not member of organization '{org_slug}'")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: No membership in organization '{org_slug}'"
+        )
+
+    # Temporary fallback: Use legacy role checking with additional org validation
+    # TODO: Remove this once org_memberships are properly populated in tokens
+    logger.info("🔄 Using legacy role validation with org context (TEMPORARY)")
+
+    # For now, we'll validate using groups or tenant context
+    # This is a temporary security measure until full org tokens are implemented
+    user_groups = getattr(token_data, 'groups', [])
+    logger.info(f"👥 User groups: {user_groups}")
+
+    # Check if user has any group that suggests org access
+    org_related_groups = [g for g in user_groups if org_slug in g.lower()]
+    if not org_related_groups:
+        logger.warning(f"❌ Access denied: No org-related groups for '{org_slug}'")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: No access to organization '{org_slug}'"
+        )
+
+    # Use legacy role checking as fallback
+    has_role = require_app_role(token_data, app_client, required_role)
+    if has_role:
+        logger.info(f"✅ Access granted via legacy validation for {org_slug}")
+        return True
+
+    logger.warning(f"❌ Access denied: Role '{required_role}' not found for {app_client}")
+    return False
+
 async def get_current_token_data(credentials: HTTPAuthorizationCredentials = Depends(security)) -> TokenData:
     """FastAPI dependency to extract and verify JWT token from Authorization header"""
     try:
@@ -111,7 +242,13 @@ def require_tenant_access(token_data: TokenData, tenant_id: str) -> bool:
     return tenant_id in token_data.all_tenants
 
 def require_app_role(token_data: TokenData, app_client: str, required_role: str) -> bool:
-    """Check if user has specific role in app"""
+    """
+    Check if user has specific role in app (LEGACY - use require_org_app_role for org-scoped validation)
+
+    ⚠️ SECURITY NOTICE: This function provides tenant-level role validation only.
+    For organization-level isolation, use require_org_app_role() instead.
+    """
+    logger.warning(f"⚠️ LEGACY AUTH: Using tenant-level role validation (consider require_org_app_role)")
     logger.info(f"🔍 ROLE CHECK START: app_client={app_client}, required_role={required_role}")
     logger.info(f"👤 User: {getattr(token_data, 'email', 'unknown')}")
     logger.info(f"🔑 Token resource_access: {getattr(token_data, 'resource_access', {})}")

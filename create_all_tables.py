@@ -33,7 +33,16 @@ def create_all_tables():
         from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
 
         logger.info("Importing tenants service models...")
-        from models import TenantSettings, SocialAccount, PasswordResetToken
+        from models import (
+            Invitation,
+            TenantSettings,
+            SocialAccount,
+            PasswordResetToken,
+            TenantApiKey,
+            Organization,
+            OrganizationAppAccess,
+            OrganizationUserRole,
+        )
 
         logger.info("All models imported successfully")
 
