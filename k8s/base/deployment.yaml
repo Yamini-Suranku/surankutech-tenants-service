@@ -31,7 +31,7 @@ spec:
       serviceAccountName: tenant-services-sa
       containers:
       - name: tenants-service
-        image: surankutech-tenants-service:v2.72
+        image: surankutech-tenants-service:v0.8
         ports:
         - containerPort: 8000
           name: http
@@ -65,6 +65,8 @@ spec:
             configMapKeyRef:
               name: tenants-config
               key: keycloak-client-id
+        - name: DARKHOLE_SERVICE_URL
+          value: "http://darkhole-api.darkhole.svc.cluster.local"
         # Cloud-agnostic Object Storage (S3-compatible)
         - name: STORAGE_TYPE
           valueFrom:
@@ -109,7 +111,6 @@ spec:
             secretKeyRef:
               name: tenants-secrets
               key: vault-token
-        # Vault Secret File Path
         - name: VAULT_ADMIN_SECRET_FILE_PATH
           value: "/vault/secrets/keycloak-admin"
         # Application Base URL for email links
@@ -198,6 +199,9 @@ spec:
           value: "local.suranku"
         # - name: DATA_PLANE_DOMAIN
         #   value: "your-domain.com"  # Uncomment and set for production
+        # Credential backend configuration
+        - name: CREDENTIAL_BACKEND
+          value: "vault"
         resources:
           requests:
             memory: "256Mi"

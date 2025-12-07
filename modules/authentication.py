@@ -14,12 +14,13 @@ from pydantic import BaseModel, EmailStr
 from shared.database import get_db
 from shared.auth import verify_token, TokenData, get_current_token_data
 from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
+from shared.email_verification import EmailVerificationService
 from models import TenantSettings, SocialAccount, PasswordResetToken
 from schemas import (
     LoginRequest, LoginResponse, TenantInfo, UserMeResponse, UserResponse,
     TenantSwitchRequest, SocialLoginRequest, SocialLoginResponse
 )
-from keycloak_client import KeycloakClient
+from modules.keycloak_client import KeycloakClient
 from modules.tenant_management import seed_app_access_metadata, get_trial_features
 import secrets
 import smtplib
@@ -61,7 +62,6 @@ async def register_user(
                 raise HTTPException(status_code=400, detail="User with this email already exists")
             else:
                 # User exists but not verified - allow resending verification
-                from email_verification import EmailVerificationService
                 verification_service = EmailVerificationService()
                 result = await verification_service.send_verification_email(db, existing_user, resend=True)
                 return {
@@ -71,20 +71,8 @@ async def register_user(
                     "verification_message": result["message"]
                 }
 
-        # Create tenant for the user
-        tenant_id = str(uuid.uuid4())
-        tenant = Tenant(
-            id=tenant_id,
-            name=f"{request.first_name} {request.last_name}'s Organization",
-            subscription_status="trial",
-            plan_id="free",
-            trial_started_at=datetime.utcnow(),
-            trial_expires_at=datetime.utcnow() + timedelta(days=14)
-        )
-        db.add(tenant)
-        db.flush()  # Flush tenant to ensure it exists in database
-
         # Create user in PENDING state (requires email verification)
+        # No default tenant/organization is created - user will create org from admin center
         user = User(
             email=request.email,
             first_name=request.first_name,
@@ -95,63 +83,20 @@ async def register_user(
         db.add(user)
         db.flush()  # Get user ID
 
-        # Create Keycloak user (disabled until email verified)
-        keycloak_user_id = await keycloak_client.create_user_with_tenant(
+        # Create Keycloak user (no tenant context, just basic platform user)
+        keycloak_user_id = await keycloak_client.create_platform_user(
             email=request.email,
             password=request.password,
             first_name=request.first_name,
-            last_name=request.last_name,
-            tenant_id=tenant_id,
-            app_roles={
-                "darkhole": ["admin"],
-                "darkfolio": ["admin"],
-                "confiploy": ["admin"]
-            }
+            last_name=request.last_name
         )
 
         # Update user with Keycloak ID
         user.keycloak_id = keycloak_user_id
 
-        # Create user-tenant relationship (also PENDING)
-        user_tenant = UserTenant(
-            user_id=user.id,
-            tenant_id=tenant_id,
-            app_roles={
-                "darkhole": ["admin"],
-                "darkfolio": ["admin"],
-                "confiploy": ["admin"]
-            },
-            status=UserStatus.PENDING,  # Will be activated after email verification
-            joined_at=None              # Will be set after verification
-        )
-        db.add(user_tenant)
-
-        # Create app access for trial
-        for app_name in ["darkhole", "darkfolio", "confiploy"]:
-            app_access = TenantAppAccess(
-                tenant_id=tenant_id,
-                app_name=app_name,
-                is_enabled=False,  # Changed to False - apps disabled by default
-                user_limit=5,  # Trial limit
-                current_users=0,  # Will be incremented after verification
-                enabled_features=get_trial_features(app_name)
-            )
-            seed_app_access_metadata(app_access, tenant, app_name)
-            db.add(app_access)
-
-        # Create tenant settings
-        tenant_settings = TenantSettings(
-            tenant_id=tenant_id,
-            timezone="UTC",
-            date_format="YYYY-MM-DD",
-            language="en"
-        )
-        db.add(tenant_settings)
-
         db.commit()
 
         # Send verification email
-        from email_verification import EmailVerificationService
         verification_service = EmailVerificationService()
         verification_result = await verification_service.send_verification_email(db, user)
 
@@ -165,8 +110,14 @@ async def register_user(
             "expires_at": verification_result.get("expires_at")
         }
 
+    except HTTPException:
+        # Re-raise HTTP exceptions to preserve status codes and messages
+        db.rollback()
+        raise
     except Exception as e:
-        logger.error(f"Registration error: {e}")
+        import traceback
+        error_trace = traceback.format_exc()
+        logger.error(f"Registration error: {str(e)}\nFull traceback:\n{error_trace}")
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
@@ -196,8 +147,28 @@ async def login_user(
             UserTenant.status == "active"
         ).order_by(UserTenant.last_accessed_at.desc().nulls_last()).all()
 
+        # Allow platform users without tenants to login (they can create orgs from admin center)
         if not user_tenants:
-            raise HTTPException(status_code=400, detail="User has no active tenant")
+            # Return minimal response for platform users without tenants
+            user_response = UserResponse(
+                id=user.id,
+                email=user.email,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                status=user.status,
+                app_roles={},  # No app roles yet
+                joined_at=None,
+                last_login=user.last_login
+            )
+
+            return LoginResponse(
+                access_token=auth_result["access_token"],
+                token_type="bearer",
+                expires_in=auth_result["expires_in"],
+                user=user_response,
+                tenants=[],  # No tenants yet
+                current_tenant=None  # No current tenant
+            )
 
         # Determine current tenant using "last used" logic
         current_user_tenant = user_tenants[0]  # First in desc order = most recently accessed
@@ -298,8 +269,25 @@ async def get_current_user(
             UserTenant.status == "active"
         ).order_by(UserTenant.last_accessed_at.desc().nulls_last()).all()
 
+        # Allow platform users without tenants (they can create orgs from admin center)
         if not user_tenants:
-            raise HTTPException(status_code=400, detail="User has no active tenant")
+            # Return minimal response for platform users without tenants
+            user_response = UserResponse(
+                id=user.id,
+                email=user.email,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                status=user.status,
+                app_roles={},  # No app roles yet
+                joined_at=None,
+                last_login=user.last_login
+            )
+
+            return UserMeResponse(
+                user=user_response,
+                tenants=[],  # No tenants yet
+                current_tenant=None  # No current tenant
+            )
 
         # Get current tenant (use most recently accessed - first in ordered list)
         current_user_tenant = user_tenants[0]

@@ -13,6 +13,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from modules.tenant_management import router as tenant_router
 from modules.organization_management import router as org_router
 from modules.organization_roles import router as org_roles_router
+from modules.platform_organization_management import router as platform_org_router
 from modules.authentication import router as auth_router
 from modules.email_verification import router as email_router
 from modules.user_management import router as user_router
@@ -23,6 +24,14 @@ from modules.admin_info import router as admin_router
 from modules.operator_integration import router as operator_router
 from modules.ldap_management import router as ldap_router
 from modules.darkhole_proxy import router as darkhole_proxy_router
+from modules.organization_access_api import router as org_access_router
+from modules.organization_azure_ad import router as org_azure_ad_router
+from modules.organization_groups import router as org_groups_router
+from modules.directory_user_sync import router as directory_sync_router
+from modules.token_enhancement_api import router as token_enhancement_router
+
+# Import organization resolver routes for DNS-based org resolution
+from org_resolver_routes import router as org_resolver_router
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -73,6 +82,7 @@ async def health_check():
 app.include_router(tenant_router)           # /tenants/*
 app.include_router(org_router)              # /tenants/{id}/orgs/* and /orgs/* (organization management)
 app.include_router(org_roles_router)        # /tenants/{id}/orgs/{id}/roles/*
+app.include_router(platform_org_router)     # /api/platform/organizations/* (platform user org management)
 app.include_router(user_router)             # /tenants/{id}/users, etc. (must come after org_router to avoid conflicts)
 app.include_router(auth_router)             # /auth/*
 app.include_router(email_router)            # /auth/verify-email, etc.
@@ -83,6 +93,12 @@ app.include_router(admin_router)            # /admin/* (platform administration)
 app.include_router(operator_router)         # /operator/* (Kubernetes operator integration)
 app.include_router(ldap_router)             # /tenants/{id}/ldap/* (LDAP/AD sync)
 app.include_router(darkhole_proxy_router)   # /tenants/{id}/orgs/{id}/apps/darkhole/*
+app.include_router(org_access_router)       # /api/access/* (organization access control)
+app.include_router(org_azure_ad_router)     # /api/platform/organizations/{id}/azure-ad/* (org Azure AD integration)
+app.include_router(org_groups_router)       # /api/platform/organizations/{id}/groups/* (manual groups management)
+app.include_router(directory_sync_router)   # /api/platform/organizations/{id}/sync-directory-to-platform (directory to platform sync)
+app.include_router(token_enhancement_router) # /api/token-enhancement/* (JWT token enhancement for Keycloak)
+app.include_router(org_resolver_router)       # /api/organizations/* (org resolution for DNS routing)
 
 # Legacy auth endpoint support for backward compatibility
 @app.post("/api/tenants/auth/login")

@@ -19,7 +19,7 @@ from shared.auth import TokenData, get_current_token_data
 from shared.models import UserTenant
 from modules.tenant_management import get_or_create_user_from_token
 from modules.organization_management import DEFAULT_DNS_ZONE
-from models import Organization, Tenant
+from models import Organization, Tenant, OrganizationUserRole
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +188,11 @@ def _validate_access(
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    if require_admin and not _has_darkhole_admin(user_tenant):
+    has_tenant_admin = _has_darkhole_admin(user_tenant)
+    has_org_admin = False
+    if require_admin and not has_tenant_admin:
+        has_org_admin = _user_has_org_darkhole_admin(db, org_id, user.id)
+    if require_admin and not (has_tenant_admin or has_org_admin):
         raise HTTPException(status_code=403, detail="DarkHole admin role required")
 
     return org, user_tenant
@@ -197,6 +201,17 @@ def _validate_access(
 def _has_darkhole_admin(user_tenant: UserTenant) -> bool:
     roles = (user_tenant.app_roles or {}).get("darkhole", [])
     return any(role in {"admin", "administrator"} for role in roles)
+
+
+def _user_has_org_darkhole_admin(db: Session, org_id: str, user_id: str) -> bool:
+    membership = db.query(OrganizationUserRole).filter(
+        OrganizationUserRole.organization_id == org_id,
+        OrganizationUserRole.user_id == user_id,
+        OrganizationUserRole.app_name == "darkhole",
+    ).first()
+    if not membership:
+        return False
+    return any(role in {"admin", "administrator"} for role in (membership.roles or []))
 
 
 def _build_org_hostname(org: Organization) -> str:

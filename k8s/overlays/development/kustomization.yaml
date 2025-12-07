@@ -13,7 +13,7 @@ patchesStrategicMerge:
 # Namespace
 namespace: tenant-services
 
-# Images
+# Imagest
 images:
 - name: surankutech-tenants-service
-  newTag: v2.72
+  newTag: v0.8

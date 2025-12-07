@@ -8,12 +8,13 @@ from sqlalchemy.orm import Session
 import logging
 from datetime import datetime
 import uuid
+import os
 
 from shared.database import get_db
 from shared.models import User
 from models import SocialAccount
 from schemas import SocialLoginRequest, SocialLoginResponse
-from keycloak_client import KeycloakClient
+from modules.keycloak_client import KeycloakClient
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,17 @@ router = APIRouter(prefix="/auth/social", tags=["social-authentication"])
 @router.get("/providers")
 async def get_social_providers():
     """Get available social login providers"""
-    # Use localhost for browser-accessible URLs
-    keycloak_public_url = "http://localhost:8080/auth"
+    import os
+
+    # Get Keycloak URL from environment
+    keycloak_base_url = os.getenv("KEYCLOAK_PUBLIC_URL", "http://localhost:8080")
+    realm = "suranku-platform"
+
+    # Frontend application client ID for social login
+    frontend_client_id = os.getenv("KEYCLOAK_FRONTEND_CLIENT_ID", "platform-frontend")
+
+    # Redirect URI after social login
+    redirect_uri = os.getenv("PLATFORM_FRONTEND_URL", "http://platform.local.suranku") + "/auth/callback"
 
     return {
         "providers": [
@@ -34,15 +44,7 @@ async def get_social_providers():
                 "display_name": "Sign in with Google",
                 "icon": "google",
                 "enabled": True,
-                "login_url": f"{keycloak_public_url}/realms/suranku-platform/protocol/openid-connect/auth?client_id=google&response_type=code&scope=openid email profile&redirect_uri={keycloak_public_url}/realms/suranku-platform/broker/google/endpoint"
-            },
-            {
-                "id": "github",
-                "name": "GitHub",
-                "display_name": "Sign in with GitHub",
-                "icon": "github",
-                "enabled": True,
-                "login_url": f"{keycloak_public_url}/realms/suranku-platform/protocol/openid-connect/auth?client_id=github&response_type=code&scope=user:email&redirect_uri={keycloak_public_url}/realms/suranku-platform/broker/github/endpoint"
+                "login_url": f"{keycloak_base_url}/realms/{realm}/protocol/openid-connect/auth?client_id={frontend_client_id}&response_type=code&scope=openid email profile&redirect_uri={redirect_uri}&kc_idp_hint=google"
             },
             {
                 "id": "microsoft",
@@ -50,7 +52,15 @@ async def get_social_providers():
                 "display_name": "Sign in with Microsoft",
                 "icon": "microsoft",
                 "enabled": True,
-                "login_url": f"{keycloak_public_url}/realms/suranku-platform/protocol/openid-connect/auth?client_id=microsoft&response_type=code&scope=openid email profile&redirect_uri={keycloak_public_url}/realms/suranku-platform/broker/microsoft/endpoint"
+                "login_url": f"{keycloak_base_url}/realms/{realm}/protocol/openid-connect/auth?client_id={frontend_client_id}&response_type=code&scope=openid email profile&redirect_uri={redirect_uri}&kc_idp_hint=microsoft"
+            },
+            {
+                "id": "github",
+                "name": "GitHub",
+                "display_name": "Sign in with GitHub",
+                "icon": "github",
+                "enabled": True,
+                "login_url": f"{keycloak_base_url}/realms/{realm}/protocol/openid-connect/auth?client_id={frontend_client_id}&response_type=code&scope=openid email profile&redirect_uri={redirect_uri}&kc_idp_hint=github"
             }
         ]
     }
@@ -90,92 +100,154 @@ async def initiate_social_login(
         logger.error(f"Social login initiation error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate social login: {str(e)}")
 
-@router.post("/callback")
-async def handle_social_callback(
-    provider: str,
+@router.get("/callback")
+async def handle_oauth_callback(
     code: str,
-    state: str,
+    state: str = None,
     db: Session = Depends(get_db)
 ):
-    """Handle social login callback"""
+    """Handle OAuth callback from Keycloak after social login"""
     try:
+        import httpx
+        from shared.models import UserStatus
+        from shared.auth import create_access_token
+
         keycloak_client = KeycloakClient()
 
-        # Exchange code for tokens
-        token_response = await keycloak_client.exchange_social_code(
-            provider=provider,
-            code=code,
-            state=state
-        )
+        # Exchange authorization code for access token
+        token_url = f"{keycloak_client.base_url}/realms/{keycloak_client.realm}/protocol/openid-connect/token"
 
-        # Get user info from social provider
-        user_info = await keycloak_client.get_social_user_info(
-            provider=provider,
-            access_token=token_response["access_token"]
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": os.getenv("KEYCLOAK_FRONTEND_CLIENT_ID", "platform-frontend"),
+                    "client_secret": os.getenv("KEYCLOAK_FRONTEND_CLIENT_SECRET"),
+                    "code": code,
+                    "redirect_uri": os.getenv("PLATFORM_FRONTEND_URL", "http://platform.local.suranku") + "/auth/callback"
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
 
-        # Check if user exists
+            if response.status_code != 200:
+                logger.error(f"Token exchange failed: {response.text}")
+                raise HTTPException(status_code=400, detail="Authentication failed")
+
+            token_data = response.json()
+
+        # Get user info from Keycloak using access token
+        userinfo_url = f"{keycloak_client.base_url}/realms/{keycloak_client.realm}/protocol/openid-connect/userinfo"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                userinfo_url,
+                headers={"Authorization": f"Bearer {token_data['access_token']}"}
+            )
+
+            if response.status_code != 200:
+                logger.error(f"Failed to get user info: {response.text}")
+                raise HTTPException(status_code=400, detail="Failed to get user information")
+
+            user_info = response.json()
+
+        # Check if user exists in our database
         user = db.query(User).filter(User.email == user_info["email"]).first()
 
+        is_new_user = False
         if not user:
-            # Create new user
+            # Create new platform user (no tenant association)
             user = User(
                 email=user_info["email"],
-                first_name=user_info.get("first_name", ""),
-                last_name=user_info.get("last_name", ""),
-                status="active",
-                is_email_verified=True
+                first_name=user_info.get("given_name", ""),
+                last_name=user_info.get("family_name", ""),
+                status=UserStatus.ACTIVE,  # Social login users are pre-verified
+                is_email_verified=True,    # Email verified by social provider
+                keycloak_id=user_info.get("sub")  # Keycloak user ID
             )
             db.add(user)
             db.flush()
+            is_new_user = True
 
-            # Create user in Keycloak
-            keycloak_user_id = await keycloak_client.create_social_user(
-                email=user_info["email"],
-                first_name=user_info.get("first_name", ""),
-                last_name=user_info.get("last_name", ""),
-                provider=provider,
-                social_id=user_info["id"]
-            )
-            user.keycloak_id = keycloak_user_id
-
-        # Create or update social account link
-        social_account = db.query(SocialAccount).filter(
-            SocialAccount.user_id == user.id,
-            SocialAccount.provider == provider
-        ).first()
-
-        if not social_account:
-            social_account = SocialAccount(
-                user_id=user.id,
-                provider=provider,
-                social_id=user_info["id"],
-                email=user_info["email"],
-                profile_data=user_info
-            )
-            db.add(social_account)
+            logger.info(f"Created new platform user via social login: {user.email}")
 
         # Update last login
         user.last_login = datetime.utcnow()
+
+        # Check if social account link exists
+        provider = user_info.get("identity_provider", "unknown")
+        if provider != "unknown":
+            social_account = db.query(SocialAccount).filter(
+                SocialAccount.user_id == user.id,
+                SocialAccount.provider == provider
+            ).first()
+
+            if not social_account:
+                social_account = SocialAccount(
+                    user_id=user.id,
+                    provider=provider,
+                    social_id=user_info.get("sub"),
+                    email=user_info["email"],
+                    profile_data=user_info,
+                    is_verified=True
+                )
+                db.add(social_account)
+
+        # Create default tenant for new platform users
+        if is_new_user:
+            try:
+                from shared.models import Tenant, UserTenant
+                from datetime import timedelta
+
+                # Create default tenant for platform user
+                tenant_name = f"{user.first_name} {user.last_name}".strip() or user.email.split('@')[0]
+                tenant = Tenant(
+                    name=f"{tenant_name}'s Workspace",
+                    subscription_status="trial",
+                    plan_id="free",
+                    trial_started_at=datetime.utcnow(),
+                    trial_expires_at=datetime.utcnow() + timedelta(days=14),
+                    is_active=True
+                )
+                db.add(tenant)
+                db.flush()
+
+                # Create UserTenant with tenant_admin role
+                user_tenant = UserTenant(
+                    user_id=user.id,
+                    tenant_id=tenant.id,
+                    app_roles={"platform": ["tenant_admin"]},
+                    status="active",
+                    joined_at=datetime.utcnow()
+                )
+                db.add(user_tenant)
+
+                logger.info(f"Created default tenant '{tenant.name}' for social login user: {user.email}")
+
+            except Exception as e:
+                logger.error(f"Failed to create default tenant for social login user: {e}")
+                # Don't fail the entire login process
+                pass
+
         db.commit()
 
-        # Generate JWT token
-        jwt_token = await keycloak_client.generate_user_token(user.keycloak_id)
+        # Return redirect to platform dashboard
+        platform_url = os.getenv("PLATFORM_FRONTEND_URL", "http://platform.local.suranku")
+        redirect_url = f"{platform_url}/dashboard?social_login_success=true&user_id={user.id}"
 
         return {
-            "access_token": jwt_token,
+            "message": "Authentication successful",
+            "redirect_url": redirect_url,
             "user": {
                 "id": user.id,
                 "email": user.email,
                 "first_name": user.first_name,
-                "last_name": user.last_name
+                "last_name": user.last_name,
+                "is_first_login": is_new_user
             },
-            "social_account": {
-                "provider": provider,
-                "linked_at": social_account.created_at
-            }
+            "keycloak_token": token_data.get("access_token")  # Pass the original Keycloak token
         }
 
     except Exception as e:
-        logger.error(f"Social callback error: {e}")
+        logger.error(f"OAuth callback error: {e}")
         raise HTTPException(status_code=500, detail=f"Social login failed: {str(e)}")

@@ -93,6 +93,15 @@ class ProvisioningEngine:
         self.api_proxy_service = os.getenv("PROVISIONING_API_PROXY_SERVICE", "kong-gateway").strip()
         self.api_proxy_port = int(os.getenv("PROVISIONING_API_PROXY_PORT", "80"))
         self.api_path_prefix = os.getenv("PROVISIONING_API_PATH_PREFIX", "/api")
+        self.shared_assets_enabled = os.getenv("PROVISIONING_SHARED_ASSETS_ENABLED", "true").lower() == "true"
+        self.shared_assets_service = os.getenv(
+            "PROVISIONING_SHARED_ASSETS_SERVICE",
+            self.api_proxy_service,
+        ).strip()
+        self.shared_assets_port = int(
+            os.getenv("PROVISIONING_SHARED_ASSETS_PORT", str(self.api_proxy_port))
+        )
+        self.shared_assets_path_prefix = os.getenv("PROVISIONING_SHARED_ASSETS_PATH", "/shared")
 
     def provision_app(
         self,
@@ -223,6 +232,12 @@ class ProvisioningEngine:
             namespace=self.shared_namespace,
             base_name=base_name,
         )
+        self._apply_shared_assets_ingress(
+            context,
+            hostname,
+            namespace=self.shared_namespace,
+            base_name=base_name,
+        )
 
     def _provision_isolated_app(self, context: ProvisioningContext, hostname: str) -> None:
         """Placeholder for pro/enterprise isolation - ensure namespace and ingress."""
@@ -248,6 +263,12 @@ class ProvisioningEngine:
         logger.debug("Applying ingress manifest:\n%s", ingress_manifest)
         _kubectl(["apply", "-f", "-"], payload=ingress_manifest)
         self._apply_api_proxy_ingress(
+            context,
+            hostname,
+            namespace=namespace,
+            base_name=base_name,
+        )
+        self._apply_shared_assets_ingress(
             context,
             hostname,
             namespace=namespace,
@@ -381,6 +402,8 @@ spec:
             ])
         if self._api_proxy_active():
             variants.append(f"{base_name}-api")
+        if self._shared_assets_active():
+            variants.append(f"{base_name}-shared")
         return variants
 
     def _cleanup_existing_ingress(self, namespace: str, base_name: str) -> None:
@@ -442,3 +465,30 @@ spec:
 
     def _api_proxy_active(self) -> bool:
         return self.api_proxy_enabled and bool(self.api_proxy_service)
+
+    def _apply_shared_assets_ingress(
+        self,
+        context: ProvisioningContext,
+        hostname: str,
+        namespace: str,
+        base_name: Optional[str] = None,
+    ) -> None:
+        if not self._shared_assets_active():
+            return
+        ingress_base = base_name or self._ingress_name(context, hostname)
+        ingress_manifest = self._build_ingress_yaml(
+            name=f"{ingress_base}-shared",
+            namespace=namespace,
+            hostname=hostname,
+            service_name=self.shared_assets_service,
+            service_port=self.shared_assets_port,
+            path_prefix=self.shared_assets_path_prefix,
+            path_type="Prefix",
+        )
+        logger.debug("Applying shared assets ingress manifest:\n%s", ingress_manifest)
+        _kubectl(["apply", "-f", "-"], payload=ingress_manifest)
+
+    def _shared_assets_active(self) -> bool:
+        return self.shared_assets_enabled and bool(self.shared_assets_service) and bool(
+            self.shared_assets_path_prefix
+        )

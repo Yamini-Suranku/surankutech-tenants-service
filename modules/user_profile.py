@@ -15,7 +15,7 @@ from shared.database import get_db
 from shared.auth import verify_token, TokenData
 from shared.models import User, UserTenant, AuditLog
 from models import SocialAccount, PasswordResetToken, Invitation
-from keycloak_client import KeycloakClient
+from modules.keycloak_client import KeycloakClient
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)

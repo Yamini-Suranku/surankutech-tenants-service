@@ -31,7 +31,7 @@ spec:
       serviceAccountName: tenant-services-sa
       containers:
       - name: provisioning-worker
-        image: surankutech-tenants-service:v2.72
+        image: surankutech-tenants-service:v0.8
         workingDir: /app
         command: ["python3", "-m", "workers.provisioning_worker"]
         env:

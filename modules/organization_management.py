@@ -11,7 +11,11 @@ import logging
 from datetime import datetime
 
 from shared.database import get_db
-from shared.auth import TokenData, get_current_token_data, require_platform_admin_access
+from shared.auth import (
+    TokenData,
+    get_current_token_data,
+    require_platform_admin_access,
+)
 from shared.models import Tenant, UserTenant, TenantAppAccess, AuditLog
 from models import Organization, OrganizationAppAccess, OrganizationUserRole
 from schemas import (
@@ -35,6 +39,7 @@ from modules.tenant_management import (
     validate_subdomain_candidate,
     slugify,
     generate_domain_suggestions,
+    user_has_tenant_admin,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,12 +80,7 @@ APP_DEFAULT_PATHS = {
 }
 
 def _user_has_tenant_admin_access(user_tenant: Optional[UserTenant]) -> bool:
-    if not user_tenant or not user_tenant.app_roles:
-        return False
-    for roles in user_tenant.app_roles.values():
-        if any(role in {"admin", "administrator", "owner", "tenant_admin"} for role in roles):
-            return True
-    return False
+    return user_has_tenant_admin(user_tenant)
 
 def _serialize_org(org: Organization, tenant: Optional[Tenant] = None) -> Dict[str, Any]:
     return {
@@ -144,13 +144,13 @@ def _seed_org_birthright_roles(
     tenant_id: str,
     org_id: str,
     granted_by: Optional[str] = None,
+    seed_memberships: Optional[List[UserTenant]] = None,
 ) -> None:
-    admins = db.query(UserTenant).filter(
-        UserTenant.tenant_id == tenant_id,
-        UserTenant.status.in_(["active", "pending"])
-    ).all()
+    if not seed_memberships:
+        return
+
     birthright_apps = {app: ["admin"] for app in APP_CATALOG.keys()}
-    for membership in admins:
+    for membership in seed_memberships:
         if _user_has_tenant_admin_access(membership):
             _grant_org_roles(
                 db,
@@ -183,10 +183,19 @@ async def list_organizations(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
-    orgs = db.query(Organization).filter(
+    orgs_query = db.query(Organization).filter(
         Organization.tenant_id == tenant_id,
         Organization.deleted_at.is_(None)
-    ).order_by(Organization.created_at.asc()).all()
+    ).order_by(Organization.created_at.asc())
+
+    orgs = orgs_query.all()
+
+    if not require_platform_admin_access(token_data):
+        allowed_ids = _user_membership_org_ids(db, user.id)
+        orgs = [
+            org for org in orgs
+            if org.id in allowed_ids or (org.created_by == user.id)
+        ]
 
     payloads = [OrganizationResponse(**_serialize_org(org, tenant)) for org in orgs]
     return OrganizationListResponse(organizations=payloads)
@@ -317,7 +326,22 @@ async def create_organization(
         tenant_id=tenant_id,
         org_id=organization.id,
         granted_by=user.id,
+        seed_memberships=[user_tenant],
     )
+
+    # Initialize Vault directory structure for the organization
+    try:
+        from shared.credential_manager import initialize_organization_vault_directories
+        vault_initialized = await initialize_organization_vault_directories(
+            tenant_id, organization.id, organization.name
+        )
+        if vault_initialized:
+            logger.info(f"Vault directories initialized for organization {organization.id}")
+        else:
+            logger.warning(f"Failed to initialize Vault directories for organization {organization.id}")
+    except Exception as e:
+        logger.error(f"Error initializing Vault directories for organization {organization.id}: {e}")
+        # Don't fail organization creation if Vault initialization fails
 
     db.commit()
     db.refresh(organization)
@@ -353,6 +377,9 @@ async def reserve_org_dns(
 
     if not organization:
         raise HTTPException(status_code=404, detail="Organization not found")
+
+    if not _user_can_manage_org(db, user.id, organization, token_data):
+        raise HTTPException(status_code=403, detail="You do not have access to manage this organization")
 
     slug_candidate, validation_errors = validate_subdomain_candidate(request.desired_subdomain)
     if validation_errors:
@@ -428,6 +455,8 @@ async def get_organization_apps(
         ).first()
         if not organization:
             raise HTTPException(status_code=404, detail="Organization not found")
+        if not _user_can_manage_org(db, user.id, organization, token_data):
+            raise HTTPException(status_code=403, detail="You do not have access to manage this organization")
 
     # Get app access metadata for this tenant
     app_access_records = db.query(TenantAppAccess).filter(
@@ -516,16 +545,20 @@ async def enable_organization_app(
     if not user_tenant:
         raise HTTPException(status_code=403, detail="Access denied to tenant")
 
-    # Check if user has admin role in any app within this tenant
-    has_admin_role = False
-    for app in ["darkhole", "darkfolio", "confiploy"]:
-        app_roles = user_tenant.app_roles.get(app, [])
-        if any(role in ["admin", "administrator"] for role in app_roles):
-            has_admin_role = True
-            break
+    is_tenant_admin = _user_has_tenant_admin_access(user_tenant)
 
-    if not has_admin_role:
-        raise HTTPException(status_code=403, detail="Admin or administrator role required to manage apps")
+    # Check if user has admin role in any app within this tenant
+    has_app_admin_role = False
+    app_role_map = user_tenant.app_roles or {}
+    if not is_tenant_admin:
+        for app in ["darkhole", "darkfolio", "confiploy"]:
+            app_roles = app_role_map.get(app, [])
+            if any(role in ["admin", "administrator"] for role in app_roles):
+                has_app_admin_role = True
+                break
+
+    if not (is_tenant_admin or has_app_admin_role):
+        raise HTTPException(status_code=403, detail="Admin, administrator, or tenant_admin role required to manage apps")
 
     organization = None
     if org_id != "default":
@@ -536,6 +569,8 @@ async def enable_organization_app(
         ).first()
         if not organization:
             raise HTTPException(status_code=404, detail="Organization not found")
+        if not _user_can_manage_org(db, user.id, organization, token_data):
+            raise HTTPException(status_code=403, detail="You do not have access to manage this organization")
 
     # Check for existing app access record
     app_access = db.query(TenantAppAccess).filter(
@@ -662,16 +697,20 @@ async def disable_organization_app(
     if not user_tenant:
         raise HTTPException(status_code=403, detail="Access denied to tenant")
 
-    # Check if user has admin role in any app within this tenant
-    has_admin_role = False
-    for app in ["darkhole", "darkfolio", "confiploy"]:
-        app_roles = user_tenant.app_roles.get(app, [])
-        if any(role in ["admin", "administrator"] for role in app_roles):
-            has_admin_role = True
-            break
+    is_tenant_admin = _user_has_tenant_admin_access(user_tenant)
 
-    if not has_admin_role:
-        raise HTTPException(status_code=403, detail="Admin or administrator role required to manage apps")
+    # Check if user has admin role in any app within this tenant
+    has_app_admin_role = False
+    app_role_map = user_tenant.app_roles or {}
+    if not is_tenant_admin:
+        for app in ["darkhole", "darkfolio", "confiploy"]:
+            app_roles = app_role_map.get(app, [])
+            if any(role in ["admin", "administrator"] for role in app_roles):
+                has_app_admin_role = True
+                break
+
+    if not (is_tenant_admin or has_app_admin_role):
+        raise HTTPException(status_code=403, detail="Admin, administrator, or tenant_admin role required to manage apps")
 
     organization = None
     if org_id != "default":
@@ -760,6 +799,9 @@ async def delete_organization(
     if not organization:
         raise HTTPException(status_code=404, detail="Organization not found")
 
+    if not _user_can_manage_org(db, user.id, organization, token_data):
+        raise HTTPException(status_code=403, detail="You do not have access to manage this organization")
+
     if organization.is_default:
         raise HTTPException(status_code=400, detail="Default organization cannot be deleted")
 
@@ -822,3 +864,141 @@ async def get_organization_details(
 
     tenant = db.query(Tenant).filter(Tenant.id == organization.tenant_id).first()
     return OrganizationResponse(**_serialize_org(organization, tenant))
+def _user_membership_org_ids(db: Session, user_id: str) -> set[str]:
+    """Return organization IDs where the user has explicit membership."""
+    rows = (
+        db.query(OrganizationUserRole.organization_id)
+        .filter(OrganizationUserRole.user_id == user_id)
+        .distinct()
+        .all()
+    )
+    org_ids: set[str] = set()
+    for row in rows:
+        if isinstance(row, tuple):
+            org_ids.add(row[0])
+        else:
+            value = getattr(row, "organization_id", None)
+            if value:
+                org_ids.add(value)
+    return org_ids
+
+
+def _user_can_manage_org(
+    db: Session,
+    user_id: str,
+    organization: Organization,
+    token_data: TokenData,
+) -> bool:
+    """Determine if caller can manage this organization."""
+    if require_platform_admin_access(token_data):
+        return True
+
+    if organization.created_by and organization.created_by == user_id:
+        return True
+
+    member_ids = _user_membership_org_ids(db, user_id)
+    return organization.id in member_ids
+
+
+@router.get("/tenants/{tenant_id}/orgs/{org_id}/users")
+async def list_organization_users(
+    tenant_id: str,
+    org_id: str,
+    include_directory: bool = True,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db),
+):
+    """
+    List all users for an organization, including both platform users and directory users.
+    """
+    from shared.models import User
+    from models import DirectoryUser
+
+    # Verify org access
+    organization = db.query(Organization).filter(
+        Organization.id == org_id,
+        Organization.tenant_id == tenant_id,
+        Organization.deleted_at.is_(None)
+    ).first()
+
+    if not organization:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    # TODO: Add proper authorization check
+    # For now, allow access if user has tenant access
+
+    users = []
+
+    # Get platform users (invited users with actual user accounts)
+    platform_users = db.query(User).join(UserTenant).filter(
+        UserTenant.tenant_id == tenant_id
+    ).all()
+
+    for user in platform_users:
+        # Get user's roles from UserTenant
+        user_tenant = db.query(UserTenant).filter(
+            UserTenant.user_id == user.id,
+            UserTenant.tenant_id == tenant_id
+        ).first()
+
+        app_roles = user_tenant.app_roles if user_tenant else {}
+
+        users.append({
+            "id": user.id,
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "full_name": f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email,
+            "source": "platform",
+            "status": "active",
+            "app_roles": app_roles,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        })
+
+    # Get directory users (Azure AD/LDAP synced users) if requested
+    if include_directory:
+        directory_users = db.query(DirectoryUser).filter(
+            DirectoryUser.organization_id == org_id,
+            DirectoryUser.tenant_id == tenant_id
+        ).all()
+
+        for dir_user in directory_users:
+            # Check if this directory user already exists as a platform user
+            existing_platform_user = next(
+                (u for u in users if u["email"].lower() == (dir_user.email or "").lower()),
+                None
+            )
+
+            if not existing_platform_user:
+                # Check if this directory user has been synced to platform (has UserTenant record)
+                platform_user = db.query(User).filter(
+                    User.email.ilike(dir_user.email)
+                ).first()
+
+                app_roles = {}
+                if platform_user:
+                    user_tenant = db.query(UserTenant).filter(
+                        UserTenant.user_id == platform_user.id,
+                        UserTenant.tenant_id == tenant_id
+                    ).first()
+                    app_roles = user_tenant.app_roles if user_tenant else {}
+
+                users.append({
+                    "id": dir_user.id,  # Use directory user ID for now
+                    "email": dir_user.email,
+                    "first_name": dir_user.first_name,
+                    "last_name": dir_user.last_name,
+                    "full_name": dir_user.display_name or f"{dir_user.first_name or ''} {dir_user.last_name or ''}".strip() or dir_user.email,
+                    "source": "directory",
+                    "provider": dir_user.provider_type,
+                    "status": "synced" if app_roles else "directory_only",
+                    "app_roles": app_roles,
+                    "created_at": dir_user.created_at.isoformat() if dir_user.created_at else None,
+                })
+
+    return {
+        "users": users,
+        "total": len(users),
+        "platform_count": len([u for u in users if u.get("source") == "platform"]),
+        "directory_count": len([u for u in users if u.get("source") == "directory"]),
+    }

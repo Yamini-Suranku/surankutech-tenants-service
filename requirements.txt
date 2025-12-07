@@ -1,3 +1,4 @@
+./vendor/surankutech_shared-0.1.1-py3-none-any.whl
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 sqlalchemy==2.0.23
@@ -19,3 +20,4 @@ python-magic==0.4.27
 python-multipart==0.0.6
 
 aiohttp==3.13.2
+hvac==1.2.1

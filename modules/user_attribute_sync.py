@@ -1,0 +1,181 @@
+"""
+User Attribute Synchronization Service
+Synchronizes user attributes in Keycloak with organization membership data
+"""
+
+import json
+import logging
+import asyncio
+from typing import List, Dict, Any, Optional
+from sqlalchemy.orm import Session
+
+from shared.database import get_db_session
+from modules.keycloak_client import KeycloakClient
+from modules.jwt_token_enhancer import jwt_enhancer
+
+logger = logging.getLogger(__name__)
+
+class UserAttributeSyncService:
+    """Service to sync user attributes with Keycloak for JWT enhancement"""
+
+    def __init__(self):
+        self.keycloak_client = KeycloakClient()
+
+    async def sync_user_org_memberships(self, user_keycloak_id: str) -> bool:
+        """
+        Sync user's organization memberships and tenant data to Keycloak user attributes
+        This enables protocol mappers to include all JWT enhancement claims
+        """
+        try:
+            logger.info(f"Syncing enhanced token data for user: {user_keycloak_id}")
+
+            # Get enhanced token data including all JWT claims
+            enhanced_data = await jwt_enhancer.get_user_enhanced_token_data(user_keycloak_id)
+
+            # Extract individual claims
+            org_memberships = enhanced_data.get("org_memberships", [])
+            tenant_id = enhanced_data.get("tenant_id")
+            all_tenants = enhanced_data.get("all_tenants", [])
+            app_roles = enhanced_data.get("app_roles", {})
+
+            # Get user data for bulk update
+            user_data = await self.keycloak_client.get_user_by_id(user_keycloak_id)
+            if not user_data:
+                logger.error(f"User {user_keycloak_id} not found in Keycloak")
+                return False
+
+            # Prepare all attributes for bulk update
+            attributes = user_data.get("attributes", {})
+
+            # Sync org_memberships
+            attributes["org_memberships"] = [json.dumps(org_memberships, separators=(',', ':'))]
+
+            # Sync tenant claims
+            if tenant_id:
+                attributes["tenant_id"] = [str(tenant_id)]
+                attributes["active_tenant"] = [str(tenant_id)]  # For compatibility
+
+            attributes["all_tenants"] = [json.dumps(all_tenants, separators=(',', ':'))]
+
+            # Sync app_roles
+            attributes["app_roles"] = [json.dumps(app_roles, separators=(',', ':'))]
+
+            # Bulk update user attributes in Keycloak
+            update_data = {"attributes": attributes}
+            success = await self.keycloak_client.update_user(user_keycloak_id, update_data)
+
+            if success:
+                logger.info(f"Successfully synced enhanced token data for user {user_keycloak_id}")
+                logger.info(f"  - Tenant ID: {tenant_id}")
+                logger.info(f"  - All tenants: {all_tenants}")
+                logger.info(f"  - App roles: {list(app_roles.keys())}")
+                logger.info(f"  - Org memberships: {len(org_memberships)}")
+                return True
+            else:
+                logger.error(f"Failed to sync enhanced token data for user {user_keycloak_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error syncing enhanced token data for {user_keycloak_id}: {e}")
+            return False
+
+    async def _update_user_attribute(self, user_keycloak_id: str, attribute_name: str, attribute_value: str) -> bool:
+        """Update a single user attribute in Keycloak"""
+        try:
+            # Get user from Keycloak
+            user_data = await self.keycloak_client.get_user_by_id(user_keycloak_id)
+            if not user_data:
+                logger.error(f"User {user_keycloak_id} not found in Keycloak")
+                return False
+
+            # Update user attributes
+            attributes = user_data.get("attributes", {})
+            attributes[attribute_name] = [attribute_value]  # Keycloak expects array for attributes
+
+            # Update user in Keycloak
+            update_data = {
+                "attributes": attributes
+            }
+
+            success = await self.keycloak_client.update_user(user_keycloak_id, update_data)
+            if success:
+                logger.info(f"Updated {attribute_name} attribute for user {user_keycloak_id}")
+                return True
+            else:
+                logger.error(f"Failed to update {attribute_name} attribute for user {user_keycloak_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error updating user attribute {attribute_name} for {user_keycloak_id}: {e}")
+            return False
+
+    async def sync_all_users_org_memberships(self) -> Dict[str, Any]:
+        """
+        Sync organization memberships for all users with active tenants
+        This is a bulk operation for initial setup or periodic sync
+        """
+        try:
+            logger.info("Starting bulk sync of user organization memberships")
+
+            stats = {
+                "total_users": 0,
+                "successful_syncs": 0,
+                "failed_syncs": 0,
+                "errors": []
+            }
+
+            with get_db_session() as db:
+                # Get all users with Keycloak IDs
+                from shared.models import User
+                users = db.query(User).filter(User.keycloak_id.isnot(None)).all()
+
+                stats["total_users"] = len(users)
+                logger.info(f"Found {len(users)} users to sync")
+
+                for user in users:
+                    try:
+                        success = await self.sync_user_org_memberships(user.keycloak_id)
+                        if success:
+                            stats["successful_syncs"] += 1
+                        else:
+                            stats["failed_syncs"] += 1
+                            stats["errors"].append(f"Failed to sync user {user.email}")
+
+                    except Exception as e:
+                        stats["failed_syncs"] += 1
+                        error_msg = f"Error syncing user {user.email}: {str(e)}"
+                        stats["errors"].append(error_msg)
+                        logger.error(error_msg)
+
+                    # Small delay to avoid overwhelming Keycloak
+                    await asyncio.sleep(0.1)
+
+            logger.info(f"Bulk sync completed: {stats['successful_syncs']}/{stats['total_users']} successful")
+            return stats
+
+        except Exception as e:
+            logger.error(f"Error in bulk sync: {e}")
+            return {"error": str(e)}
+
+    async def sync_user_on_org_change(self, user_id: str, organization_id: str) -> bool:
+        """
+        Sync user attributes when organization membership changes
+        Called after organization role assignments or removals
+        """
+        try:
+            with get_db_session() as db:
+                from shared.models import User
+                user = db.query(User).filter(User.id == user_id).first()
+                if not user or not user.keycloak_id:
+                    logger.error(f"User {user_id} not found or missing Keycloak ID")
+                    return False
+
+                logger.info(f"Syncing org memberships for user {user.email} after org {organization_id} change")
+                return await self.sync_user_org_memberships(user.keycloak_id)
+
+        except Exception as e:
+            logger.error(f"Error syncing user on org change: {e}")
+            return False
+
+# Global instance
+user_attribute_sync = UserAttributeSyncService()

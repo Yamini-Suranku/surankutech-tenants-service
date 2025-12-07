@@ -150,7 +150,8 @@ class KeycloakClient:
         first_name: str,
         last_name: str,
         tenant_id: str,
-        app_roles: Dict[str, List[str]]
+        app_roles: Dict[str, List[str]],
+        org_app_roles: Optional[Dict[str, Dict[str, List[str]]]] = None
     ) -> str:
         """Create user in Keycloak and assign to tenant groups with app roles"""
         try:
@@ -172,7 +173,11 @@ class KeycloakClient:
                     }],
                     "attributes": {
                         "tenant_id": [tenant_id],
-                        "email_verification_pending": ["true"]
+                        "email_verification_pending": ["true"],
+                        **(
+                            {"org_app_roles": [json.dumps(org_app_roles)]}
+                            if org_app_roles else {}
+                        )
                     }
                 }
 
@@ -201,12 +206,70 @@ class KeycloakClient:
 
                 # Assign app-specific roles
                 await self._assign_app_roles(user_id, app_roles, token, client)
+                realm_roles = {
+                    role
+                    for roles in app_roles.values()
+                    for role in roles
+                    if role == "tenant_admin"
+                }
+                if realm_roles:
+                    await self._assign_realm_roles(user_id, list(realm_roles), token, client)
 
                 return user_id
 
         except Exception as e:
             logger.error(f"User creation error: {e}")
             raise Exception(f"Failed to create user: {str(e)}")
+
+    async def create_platform_user(
+        self,
+        email: str,
+        password: str,
+        first_name: str,
+        last_name: str
+    ) -> str:
+        """Create a platform user in Keycloak without tenant association"""
+        try:
+            token = await self.get_admin_token()
+            async with httpx.AsyncClient() as client:
+                # Create user with unverified email for traditional registration
+                user_data = {
+                    "username": email,
+                    "email": email,
+                    "firstName": first_name,
+                    "lastName": last_name,
+                    "enabled": False,  # Disabled until email verified
+                    "emailVerified": False,  # Email not verified yet
+                    "credentials": [{
+                        "type": "password",
+                        "value": password,
+                        "temporary": False
+                    }],
+                    "attributes": {
+                        "email_verification_pending": ["true"],
+                        "platform_user": ["true"]  # Mark as platform user without tenant
+                    }
+                }
+
+                response = await client.post(
+                    f"{self.base_url}/admin/realms/{self.realm}/users",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=user_data
+                )
+
+                if response.status_code != 201:
+                    if response.status_code == 409:
+                        raise Exception("User with this email already exists")
+                    raise Exception(f"Failed to create platform user: {response.text}")
+
+                # Get user ID from location header
+                user_id = response.headers["Location"].split("/")[-1]
+                logger.info(f"Created platform user {email} with ID: {user_id}")
+                return user_id
+
+        except Exception as e:
+            logger.error(f"Platform user creation error: {e}")
+            raise Exception(f"Failed to create platform user: {str(e)}")
 
     async def delete_user(self, user_id: Optional[str]) -> None:
         """Delete a Keycloak user if the account exists."""
@@ -387,7 +450,7 @@ class KeycloakClient:
             logger.error(f"User info error: {e}")
             raise Exception(f"Failed to get user info: {str(e)}")
 
-    async def activate_user_after_verification(self, keycloak_id: str, app_roles: Dict[str, List[str]] = None) -> bool:
+    async def activate_user_after_verification(self, keycloak_id: str, app_roles: Dict[str, List[str]] = None, org_app_roles: Optional[Dict[str, Dict[str, List[str]]]] = None) -> bool:
         """Activate Keycloak user after email verification and assign roles"""
         try:
             token = await self.get_admin_token()
@@ -419,12 +482,45 @@ class KeycloakClient:
                     logger.info(f"Assigning app roles to user {keycloak_id}: {app_roles}")
                     await self._assign_app_roles(keycloak_id, app_roles, token, client)
                     logger.info(f"Successfully assigned roles to user {keycloak_id}")
+                    realm_roles = {
+                        role
+                        for roles in app_roles.values()
+                        for role in roles
+                        if role == "tenant_admin"
+                    }
+                    if realm_roles:
+                        await self._assign_realm_roles(keycloak_id, list(realm_roles), token, client)
+
+                # Persist org_app_roles as a user attribute for token mappers
+                if org_app_roles is not None:
+                    await self._update_user_attributes(
+                        keycloak_id,
+                        attributes={
+                            "org_app_roles": [json.dumps(org_app_roles)]
+                        },
+                        token=token,
+                        client=client
+                    )
 
                 return True
 
         except Exception as e:
             logger.error(f"Keycloak user activation error: {e}")
             return False
+
+    async def _update_user_attributes(self, user_id: str, attributes: Dict[str, List[str]], token: Optional[str] = None, client: Optional[httpx.AsyncClient] = None):
+        """Update arbitrary user attributes."""
+        managed_client = client is None
+        token = token or await self.get_admin_token()
+        async with (httpx.AsyncClient() if managed_client else client) as c:
+            response = await c.put(
+                f"{self.base_url}/admin/realms/{self.realm}/users/{user_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"attributes": attributes}
+            )
+            if response.status_code not in [200, 204]:
+                logger.error(f"Failed to update user attributes for {user_id}: {response.text}")
+                raise Exception(f"Failed to update user attributes: {response.text}")
 
     async def authenticate_user(self, email: str, password: str) -> Dict[str, Any]:
         """Authenticate user with email and password using Keycloak"""
@@ -628,6 +724,40 @@ class KeycloakClient:
             logger.error(traceback.format_exc())
             # Don't fail user creation if role assignment fails
 
+    async def _assign_realm_roles(
+        self,
+        user_id: str,
+        roles: List[str],
+        token: str,
+        client: httpx.AsyncClient
+    ):
+        """Assign realm-level roles to a user"""
+        try:
+            for role_name in roles:
+                role_response = await client.get(
+                    f"{self.base_url}/admin/realms/{self.realm}/roles/{role_name}",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+
+                if role_response.status_code != 200:
+                    logger.warning(f"Realm role {role_name} not found: {role_response.text}")
+                    continue
+
+                role_data = role_response.json()
+                assign_response = await client.post(
+                    f"{self.base_url}/admin/realms/{self.realm}/users/{user_id}/role-mappings/realm",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=[role_data]
+                )
+
+                if assign_response.status_code not in (204, 201):
+                    logger.warning(f"Failed to assign realm role {role_name}: {assign_response.text}")
+                else:
+                    logger.info(f"Assigned realm role {role_name} to user {user_id}")
+
+        except Exception as e:
+            logger.error(f"Realm role assignment error: {e}")
+
     async def _get_user_by_email(
         self,
         email: str,
@@ -757,6 +887,14 @@ class KeycloakClient:
                 # Assign app-specific roles for the new tenant
                 await self._assign_app_roles(user_id, app_roles, token, client)
                 logger.info(f"Assigned app roles to user {user_email} for tenant {tenant_id}: {app_roles}")
+                realm_roles = {
+                    role
+                    for roles in app_roles.values()
+                    for role in roles
+                    if role == "tenant_admin"
+                }
+                if realm_roles:
+                    await self._assign_realm_roles(user_id, list(realm_roles), token, client)
 
                 return user_id
 
@@ -1197,3 +1335,50 @@ class KeycloakClient:
             "changed_sync_period": "changedSyncPeriod"
         }
         return key_mapping.get(key)
+
+    async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get user by Keycloak ID"""
+        try:
+            token = await self.get_admin_token()
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/admin/realms/{self.realm}/users/{user_id}",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    logger.warning(f"User {user_id} not found in Keycloak")
+                    return None
+                else:
+                    logger.error(f"Failed to get user {user_id}: {response.status_code} - {response.text}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Error getting user {user_id}: {e}")
+            return None
+
+    async def update_user(self, user_id: str, user_data: Dict[str, Any]) -> bool:
+        """Update user in Keycloak"""
+        try:
+            token = await self.get_admin_token()
+
+            async with httpx.AsyncClient() as client:
+                response = await client.put(
+                    f"{self.base_url}/admin/realms/{self.realm}/users/{user_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=user_data
+                )
+
+                if response.status_code == 204:
+                    logger.info(f"Successfully updated user {user_id}")
+                    return True
+                else:
+                    logger.error(f"Failed to update user {user_id}: {response.status_code} - {response.text}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Error updating user {user_id}: {e}")
+            return False

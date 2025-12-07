@@ -30,8 +30,9 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 # Set work directory
 WORKDIR /app
 
-# Copy requirements first (for better Docker layer caching)
+# Copy requirements and vendor wheel first (for better Docker layer caching)
 COPY requirements.txt .
+COPY vendor/ ./vendor/
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip \

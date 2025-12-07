@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, EmailStr, validator, root_validator
+from pydantic import BaseModel, Field, EmailStr, validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -94,9 +94,10 @@ class TenantSettingsUpdateRequest(BaseModel):
 
 class OrganizationCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=255)
-    desired_subdomain: str = Field(..., min_length=3, max_length=63)
+    desired_subdomain: Optional[str] = Field(None, min_length=3, max_length=63, description="Optional custom subdomain")
     description: Optional[str] = Field(None, max_length=1000)
     dns_zone: Optional[str] = Field(None, max_length=255, description="DNS zone or domain suffix (e.g., local.suranku)")
+    enabled_apps: Optional[List[str]] = Field(default=["darkhole"], description="List of apps to enable for this organization")
 
 class OrganizationDNSRequest(BaseModel):
     desired_subdomain: str = Field(..., min_length=3, max_length=63)
@@ -114,8 +115,12 @@ class OrganizationResponse(BaseModel):
     dns_status: str
     status: str
     is_default: bool = False
+    created_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    tenant_name: Optional[str] = None
+    apps_enabled: Optional[List[str]] = []
+    is_creator: Optional[bool] = False
 
     class Config:
         from_attributes = True
@@ -557,7 +562,7 @@ class LDAPConfigCreateRequest(BaseModel):
     def normalize_provider(cls, value):
         return normalize_directory_provider(value)
 
-    @root_validator
+    @model_validator(mode='before')
     def validate_provider_requirements(cls, values):
         provider = values.get("provider_type", "ldap")
         if provider == "ldap":
@@ -718,7 +723,7 @@ class LDAPTestConnectionRequest(BaseModel):
     def normalize_test_provider(cls, value):
         return normalize_directory_provider(value)
 
-    @root_validator
+    @model_validator(mode='before')
     def validate_test_fields(cls, values):
         provider = values.get("provider_type", "ldap")
         if provider == "ldap":

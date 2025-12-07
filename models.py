@@ -195,16 +195,21 @@ class Organization(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(255), nullable=False)
-    slug = Column(String(255), nullable=False, unique=True, index=True)
+    slug = Column(String(255), nullable=False, index=True)  # Removed unique constraint - unique per tenant
     description = Column(Text, nullable=True)
 
-    dns_subdomain = Column(String(255), nullable=False, unique=True, index=True)
+    # DNS configuration - now optional since multiple orgs can share tenant domain
+    dns_subdomain = Column(String(255), nullable=True, index=True)
     dns_zone = Column(String(255), nullable=True)
     dns_hostname = Column(String(255), nullable=True)
     dns_status = Column(String(50), default="pending", index=True)
 
+    # Organization type/department info
+    org_type = Column(String(50), default="department", index=True)  # department, team, division
+    parent_org_id = Column(String(36), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True)
+
     status = Column(String(50), default="active", index=True)
-    is_default = Column(Boolean, default=False, index=True)
+    is_default = Column(Boolean, default=False, index=True)  # Default org for tenant
     created_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
 
     metadata_json = Column(JSON, nullable=True)
@@ -219,7 +224,11 @@ class Organization(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint('tenant_id', 'slug', name='uix_tenant_org_slug'),  # Unique slug per tenant
+        UniqueConstraint('dns_subdomain', name='uix_global_org_subdomain'),  # Unique subdomain globally across platform
         Index('idx_org_tenant_status', 'tenant_id', 'status'),
+        Index('idx_org_type_tenant', 'tenant_id', 'org_type'),
+        Index('idx_org_dns_subdomain', 'dns_subdomain'),  # For fast global lookup
     )
 
 class OrganizationAppAccess(Base):
@@ -263,7 +272,9 @@ class OrganizationUserRole(Base):
 
     granted_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     granted_via = Column(String(50), default="manual")  # manual, invitation, ad_sync, system
+    granted_at = Column(DateTime, default=datetime.utcnow)  # When the role was granted
     metadata_json = Column(JSON, nullable=True)
+    sync_batch_id = Column(String(36), ForeignKey("tenant_ldap_sync_history.id", ondelete="SET NULL"), nullable=True, index=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -408,6 +419,7 @@ class TenantLDAPConfig(Base):
     # Azure Entra Graph configuration
     graph_tenant_id = Column(String(100), nullable=True)
     graph_client_id = Column(String(100), nullable=True)
+    group_role_mappings = Column(JSON, nullable=True, default={})  # Store group-to-role mappings as JSON
 
     # Sync Settings
     sync_registrations = Column(Boolean, default=True)  # Allow new user registration from LDAP
@@ -492,4 +504,173 @@ class TenantLDAPSyncHistory(Base):
         Index('idx_ldap_sync_started', 'started_at'),
         Index('idx_ldap_sync_status', 'sync_status'),
         Index('idx_ldap_sync_type', 'sync_type'),
+    )
+
+
+class DirectoryUser(Base):
+    """
+    Stores users synced from directory services (Azure AD, LDAP) for caching and role mapping.
+    """
+    __tablename__ = "directory_users"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    ldap_config_id = Column(String(36), ForeignKey("tenant_ldap_configs.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Directory identifiers
+    external_id = Column(String(255), nullable=False, index=True)  # Azure AD objectId or LDAP DN
+    provider_type = Column(String(50), nullable=False, index=True)  # 'azure_ad_graph', 'ldap'
+
+    # User attributes
+    username = Column(String(255), nullable=True, index=True)  # sAMAccountName or userPrincipalName
+    email = Column(String(255), nullable=True, index=True)
+    display_name = Column(String(255), nullable=True)
+    first_name = Column(String(255), nullable=True)
+    last_name = Column(String(255), nullable=True)
+    enabled = Column(Boolean, default=True, nullable=False)
+
+    # Additional metadata
+    attributes = Column(JSON, nullable=True)  # Store additional directory attributes as JSON
+
+    # Sync metadata
+    last_synced_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('ldap_config_id', 'external_id', name='uix_directory_user_config_external'),
+        Index('idx_directory_user_tenant', 'tenant_id'),
+        Index('idx_directory_user_org', 'organization_id'),
+        Index('idx_directory_user_provider', 'provider_type'),
+        Index('idx_directory_user_email', 'email'),
+        Index('idx_directory_user_sync', 'last_synced_at'),
+    )
+
+
+class DirectoryGroup(Base):
+    """
+    Stores groups synced from directory services (Azure AD, LDAP) for caching and role mapping.
+    """
+    __tablename__ = "directory_groups"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    ldap_config_id = Column(String(36), ForeignKey("tenant_ldap_configs.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Directory identifiers
+    external_id = Column(String(255), nullable=False, index=True)  # Azure AD objectId or LDAP DN
+    provider_type = Column(String(50), nullable=False, index=True)  # 'azure_ad_graph', 'ldap'
+
+    # Group attributes
+    name = Column(String(255), nullable=False, index=True)  # cn or displayName
+    display_name = Column(String(255), nullable=True)
+    description = Column(Text, nullable=True)
+    email = Column(String(255), nullable=True)
+    security_enabled = Column(Boolean, default=True, nullable=False)
+
+    # Additional metadata
+    attributes = Column(JSON, nullable=True)  # Store additional directory attributes as JSON
+
+    # Sync metadata
+    last_synced_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('ldap_config_id', 'external_id', name='uix_directory_group_config_external'),
+        Index('idx_directory_group_tenant', 'tenant_id'),
+        Index('idx_directory_group_org', 'organization_id'),
+        Index('idx_directory_group_provider', 'provider_type'),
+        Index('idx_directory_group_name', 'name'),
+        Index('idx_directory_group_sync', 'last_synced_at'),
+    )
+
+
+class DirectoryGroupMembership(Base):
+    """
+    Stores directory group memberships for users.
+    """
+    __tablename__ = "directory_group_memberships"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    directory_group_id = Column(String(36), ForeignKey("directory_groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    directory_user_id = Column(String(36), ForeignKey("directory_users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Sync metadata
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_synced_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint('directory_group_id', 'directory_user_id', name='uix_directory_membership'),
+        Index('idx_membership_group', 'directory_group_id'),
+        Index('idx_membership_user', 'directory_user_id'),
+        Index('idx_membership_sync', 'last_synced_at'),
+    )
+
+
+class OrganizationGroup(Base):
+    """
+    Manual groups created for organizations (email-invited users).
+    Complements DirectoryGroup for complete group management.
+    """
+    __tablename__ = "organization_groups"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Group information
+    name = Column(String(255), nullable=False, index=True)
+    display_name = Column(String(255), nullable=True)
+    description = Column(Text, nullable=True)
+    color = Column(String(7), nullable=False, default="#6366f1")  # Hex color for UI display
+    source_type = Column(String(50), nullable=False, default="manual", index=True)
+
+    # Role mappings for apps (similar to directory groups)
+    app_role_mappings = Column(JSON, nullable=False, default={})
+
+    # Creation metadata
+    created_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationships
+    tenant = relationship("Tenant", back_populates=None)
+    organization = relationship("Organization", back_populates=None)
+    creator = relationship("User", foreign_keys=[created_by], back_populates=None)
+
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'name', name='uix_org_group_name_org'),
+        Index('idx_org_group_tenant', 'tenant_id'),
+        Index('idx_org_group_organization', 'organization_id'),
+        Index('idx_org_group_name', 'name'),
+        Index('idx_org_group_source', 'source_type'),
+    )
+
+
+class OrganizationGroupMembership(Base):
+    """
+    Stores manual group memberships for email-invited users.
+    """
+    __tablename__ = "organization_group_memberships"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    organization_group_id = Column(String(36), ForeignKey("organization_groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Membership metadata
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+
+    # Relationships
+    organization_group = relationship("OrganizationGroup", back_populates=None)
+    user = relationship("User", foreign_keys=[user_id], back_populates=None)
+    creator = relationship("User", foreign_keys=[created_by], back_populates=None)
+
+    __table_args__ = (
+        UniqueConstraint('organization_group_id', 'user_id', name='uix_org_group_membership'),
+        Index('idx_org_group_membership_group', 'organization_group_id'),
+        Index('idx_org_group_membership_user', 'user_id'),
     )

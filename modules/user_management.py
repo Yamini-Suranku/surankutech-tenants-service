@@ -13,14 +13,16 @@ import uuid
 from shared.database import get_db
 from shared.auth import verify_token, require_tenant_access, TokenData
 from shared.models import User, UserTenant, TenantAppAccess, AuditLog
-from models import Invitation, SocialAccount, Organization
+from models import Invitation, SocialAccount, Organization, OrganizationUserRole
 from modules.organization_management import DEFAULT_DNS_ZONE
+from modules.tenant_management import user_has_tenant_admin
 from schemas import (
     UserInviteRequest, InvitationResponse, UserResponse, UserUpdateRequest,
     UserListResponse, PaginationInfo, InvitationAcceptRequest, InvitationResendRequest
 )
 from typing import List, Optional
 from pydantic import BaseModel
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,43 @@ def _derive_org_hostname(org: Organization) -> Optional[str]:
     if org.slug:
         return f"{org.slug}.{zone}"
     return None
+
+def _upsert_org_roles(
+    db: Session,
+    tenant_id: str,
+    org_id: Optional[str],
+    user_id: str,
+    app_roles: Optional[dict],
+    granted_by: Optional[str],
+    granted_via: str = "invitation"
+):
+    """Ensure org-scoped roles are written when an invitation is accepted."""
+    if not org_id or not app_roles:
+        return
+    for app_name, roles in (app_roles or {}).items():
+        normalized = sorted(set(roles or []))
+        entry = db.query(OrganizationUserRole).filter(
+            OrganizationUserRole.organization_id == org_id,
+            OrganizationUserRole.user_id == user_id,
+            OrganizationUserRole.app_name == app_name,
+        ).first()
+        if normalized:
+            if entry:
+                entry.roles = normalized
+                entry.granted_by = granted_by
+                entry.granted_via = granted_via
+            else:
+                db.add(OrganizationUserRole(
+                    tenant_id=tenant_id,
+                    organization_id=org_id,
+                    user_id=user_id,
+                    app_name=app_name,
+                    roles=normalized,
+                    granted_by=granted_by,
+                    granted_via=granted_via,
+                ))
+        elif entry:
+            db.delete(entry)
 
 @router.get("/tenants/{tenant_id}/users", response_model=UserListResponse)
 async def list_tenant_users(
@@ -169,14 +208,18 @@ async def invite_user(
 
     logger.info(f"User {current_user.id} has access to tenant {tenant_id} with roles: {user_tenant.app_roles}")
 
-    # Check if user is admin in this tenant
-    is_admin = any(
-        "admin" in user_tenant.app_roles.get(app, [])
+    # Check if user is tenant admin or app admin in this tenant
+    is_tenant_admin = user_has_tenant_admin(user_tenant)
+    has_app_admin_role = any(
+        any(role in {"admin", "administrator"} for role in user_tenant.app_roles.get(app, []))
         for app in ["darkhole", "darkfolio", "confiploy"]
     )
 
-    if not is_admin:
-        raise HTTPException(status_code=403, detail="Admin role required to invite users")
+    if not (is_tenant_admin or has_app_admin_role):
+        raise HTTPException(
+            status_code=403,
+            detail="Admin, administrator, or tenant_admin role required to invite users"
+        )
 
     target_org = None
     org_hostname = _normalize_hostname(request.organization_hostname)
@@ -212,46 +255,46 @@ async def invite_user(
 
     # Check for existing invitation first
     logger.info(f"Checking for existing invitation: tenant_id={tenant_id}, email={request.email}")
-    existing_invitation = db.query(Invitation).filter(
-        Invitation.tenant_id == tenant_id,
-        Invitation.email == request.email
-    ).first()
+    existing_invitation = (
+        db.query(Invitation)
+        .filter(
+            Invitation.tenant_id == tenant_id,
+            Invitation.email == request.email,
+            Invitation.status == "pending"
+        )
+        .order_by(Invitation.created_at.desc())
+        .first()
+    )
 
     logger.info(f"Existing invitation query result: {existing_invitation}")
     if existing_invitation:
         logger.info(f"Found existing invitation: id={existing_invitation.id}, status={existing_invitation.status}")
 
     if existing_invitation:
-        if existing_invitation.status == "pending":
-            # Check cooldown for resend (like email verification)
-            cooldown_minutes = 5  # Same as email verification
-            if existing_invitation.last_sent_at:
-                cooldown_time = existing_invitation.last_sent_at + timedelta(minutes=cooldown_minutes)
-                if datetime.utcnow() < cooldown_time:
-                    remaining_minutes = (cooldown_time - datetime.utcnow()).total_seconds() / 60
-                    raise HTTPException(
-                        status_code=429,  # Too Many Requests
-                        detail=f"Please wait {int(remaining_minutes)} more minutes before resending invitation to {request.email}"
-                    )
+        # Check cooldown for resend (like email verification)
+        cooldown_minutes = 5  # Same as email verification
+        if existing_invitation.last_sent_at:
+            cooldown_time = existing_invitation.last_sent_at + timedelta(minutes=cooldown_minutes)
+            if datetime.utcnow() < cooldown_time:
+                remaining_minutes = (cooldown_time - datetime.utcnow()).total_seconds() / 60
+                raise HTTPException(
+                    status_code=429,  # Too Many Requests
+                    detail=f"Please wait {int(remaining_minutes)} more minutes before resending invitation to {request.email}"
+                )
 
-            # Update existing pending invitation (resend)
-            existing_invitation.app_roles = request.app_roles
-            existing_invitation.invited_by = current_user.id
-            existing_invitation.expires_at = datetime.utcnow() + timedelta(days=7)
-            existing_invitation.resent_count = (existing_invitation.resent_count or 0) + 1
-            existing_invitation.last_sent_at = datetime.utcnow()
-            existing_invitation.updated_at = datetime.utcnow()
-            if target_org or request.organization_id:
-                existing_invitation.organization_id = target_org.id if target_org else request.organization_id
-            if org_hostname:
-                existing_invitation.organization_hostname = org_hostname
-            invitation = existing_invitation
-            logger.info(f"Resending invitation for {request.email} (attempt #{invitation.resent_count})")
-        else:
-            raise HTTPException(
-                status_code=409,
-                detail=f"User {request.email} already has a {existing_invitation.status} invitation"
-            )
+        # Update existing pending invitation (resend)
+        existing_invitation.app_roles = request.app_roles
+        existing_invitation.invited_by = current_user.id
+        existing_invitation.expires_at = datetime.utcnow() + timedelta(days=7)
+        existing_invitation.resent_count = (existing_invitation.resent_count or 0) + 1
+        existing_invitation.last_sent_at = datetime.utcnow()
+        existing_invitation.updated_at = datetime.utcnow()
+        if target_org or request.organization_id:
+            existing_invitation.organization_id = target_org.id if target_org else request.organization_id
+        if org_hostname:
+            existing_invitation.organization_hostname = org_hostname
+        invitation = existing_invitation
+        logger.info(f"Resending invitation for {request.email} (attempt #{invitation.resent_count})")
     else:
         # Create new invitation
         invitation = Invitation(
@@ -1125,6 +1168,17 @@ async def accept_invitation(
         if invitation.expires_at and datetime.utcnow() > invitation.expires_at:
             raise HTTPException(status_code=400, detail="Invitation has expired")
 
+        # If org-scoped invite, ensure org exists
+        target_org = None
+        if invitation.organization_id:
+            target_org = db.query(Organization).filter(
+                Organization.id == invitation.organization_id,
+                Organization.tenant_id == invitation.tenant_id,
+                Organization.deleted_at.is_(None)
+            ).first()
+            if not target_org:
+                raise HTTPException(status_code=404, detail="Organization not found for this invitation")
+
         # Check if user with this email already exists
         existing_user = db.query(User).filter(User.email == invitation.email).first()
 
@@ -1136,15 +1190,25 @@ async def accept_invitation(
             ).first()
 
             if existing_user_tenant:
-                # Update invitation status anyway
+                # Update invitation status anyway and grant org roles if scoped
                 invitation.status = "accepted"
                 invitation.accepted_at = datetime.utcnow()
+                if target_org:
+                    _upsert_org_roles(
+                        db,
+                        tenant_id=invitation.tenant_id,
+                        org_id=target_org.id,
+                        user_id=existing_user.id,
+                        app_roles=invitation.app_roles,
+                        granted_by=invitation.invited_by,
+                        granted_via="invitation"
+                    )
                 db.commit()
 
                 return {
                     "status": "already_member",
                     "message": "You are already a member of this organization",
-                    "redirect_url": login_url
+                    "redirect_url": _build_login_url(invitation)
                 }
             else:
                 # Add existing user to tenant
@@ -1156,6 +1220,25 @@ async def accept_invitation(
                     joined_at=datetime.utcnow()
                 )
                 db.add(user_tenant)
+
+                if target_org:
+                    _upsert_org_roles(
+                        db,
+                        tenant_id=invitation.tenant_id,
+                        org_id=target_org.id,
+                        user_id=existing_user.id,
+                        app_roles=invitation.app_roles,
+                        granted_by=invitation.invited_by,
+                        granted_via="invitation"
+                    )
+                    # Also persist org_app_roles in Keycloak attribute if user has keycloak_id
+                    if existing_user.keycloak_id:
+                        from modules.keycloak_client import KeycloakClient
+                        kc_client = KeycloakClient()
+                        await kc_client._update_user_attributes(
+                            existing_user.keycloak_id,
+                            attributes={"org_app_roles": [json.dumps({target_org.id: invitation.app_roles})]}
+                        )
 
                 # Update invitation status
                 invitation.status = "accepted"
@@ -1172,7 +1255,7 @@ async def accept_invitation(
                 }
 
         # User doesn't exist - create new user account
-        from keycloak_client import KeycloakClient
+        from modules.keycloak_client import KeycloakClient
         import uuid
 
         # Create user in database (no password stored here)
@@ -1198,14 +1281,19 @@ async def accept_invitation(
                 first_name=request.first_name,
                 last_name=request.last_name,
                 tenant_id=invitation.tenant_id,
-                app_roles=invitation.app_roles
+                app_roles=invitation.app_roles,
+                org_app_roles={target_org.id: invitation.app_roles} if target_org else None
             )
 
             # Update user with Keycloak ID
             new_user.keycloak_id = keycloak_user_id
 
             # Enable the Keycloak user immediately for invited users (skip email verification)
-            await keycloak_client.activate_user_after_verification(keycloak_user_id)
+            await keycloak_client.activate_user_after_verification(
+                keycloak_user_id,
+                app_roles=invitation.app_roles,
+                org_app_roles={target_org.id: invitation.app_roles} if target_org else None
+            )
 
         except Exception as keycloak_error:
             # If Keycloak creation fails, we still want to create the local user
@@ -1222,6 +1310,24 @@ async def accept_invitation(
             joined_at=datetime.utcnow()
         )
         db.add(user_tenant)
+
+        if target_org:
+            _upsert_org_roles(
+                db,
+                tenant_id=invitation.tenant_id,
+                org_id=target_org.id,
+                user_id=new_user.id,
+                app_roles=invitation.app_roles,
+                granted_by=invitation.invited_by,
+                granted_via="invitation"
+            )
+            if new_user.keycloak_id:
+                from modules.keycloak_client import KeycloakClient
+                kc_client = KeycloakClient()
+                await kc_client._update_user_attributes(
+                    new_user.keycloak_id,
+                    attributes={"org_app_roles": [json.dumps({target_org.id: invitation.app_roles})]}
+                )
 
         # Update invitation status
         invitation.status = "accepted"

@@ -20,7 +20,7 @@ from schemas import (
     LDAPUserPreviewResponse,
     PaginationInfo
 )
-from keycloak_client import KeycloakClient
+from modules.keycloak_client import KeycloakClient
 from shared.auth import get_current_user
 from shared.credential_manager import get_credential_manager
 

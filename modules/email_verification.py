@@ -3,17 +3,28 @@ Email Verification Module
 Handles email verification endpoints and functionality
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 import logging
+import os
 
 from shared.database import get_db
+from shared.models import User
+from shared.email_verification import EmailVerificationService
+from pydantic import BaseModel, EmailStr
 
 logger = logging.getLogger(__name__)
 
 # Create router for email verification endpoints
-router = APIRouter(prefix="/auth", tags=["email-verification"])
+router = APIRouter(prefix="/api/tenants/auth", tags=["email-verification"])
+
+class VerificationRequest(BaseModel):
+    email: EmailStr
+    token: str
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
 
 @router.get("/verify-email")
 async def verify_email(
@@ -23,12 +34,13 @@ async def verify_email(
 ):
     """Verify user email address and activate account"""
     try:
-        from email_verification import EmailVerificationService
         verification_service = EmailVerificationService()
 
         result = await verification_service.verify_email(db, email, token)
 
         if result["status"] == "verified":
+            base_login_url = os.getenv("PLATFORM_LOGIN_URL", "http://id.local.suranku/login/index.html")
+            login_url = f"{base_login_url}{'&' if '?' in base_login_url else '?'}verified=true"
             # Return HTML success page with option to go to login
             html_content = """
             <!DOCTYPE html>
@@ -36,7 +48,7 @@ async def verify_email(
             <head>
                 <title>Email Verified Successfully</title>
                 <style>
-                    body {
+                    body {{
                         font-family: Arial, sans-serif;
                         display: flex;
                         justify-content: center;
@@ -44,30 +56,30 @@ async def verify_email(
                         min-height: 100vh;
                         margin: 0;
                         background-color: #f5f5f5;
-                    }
-                    .container {
+                    }}
+                    .container {{
                         text-align: center;
                         background: white;
                         padding: 3rem;
                         border-radius: 10px;
                         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
                         max-width: 500px;
-                    }
-                    .success-icon {
+                    }}
+                    .success-icon {{
                         color: #4CAF50;
                         font-size: 4rem;
                         margin-bottom: 1rem;
-                    }
-                    h1 {
+                    }}
+                    h1 {{
                         color: #333;
                         margin-bottom: 1rem;
-                    }
-                    p {
+                    }}
+                    p {{
                         color: #666;
                         margin-bottom: 2rem;
                         line-height: 1.6;
-                    }
-                    .login-btn {
+                    }}
+                    .login-btn {{
                         background-color: #007bff;
                         color: white;
                         padding: 12px 30px;
@@ -78,10 +90,10 @@ async def verify_email(
                         text-decoration: none;
                         display: inline-block;
                         transition: background-color 0.3s;
-                    }
-                    .login-btn:hover {
+                    }}
+                    .login-btn:hover {{
                         background-color: #0056b3;
-                    }
+                    }}
                 </style>
             </head>
             <body>
@@ -89,11 +101,11 @@ async def verify_email(
                     <div class="success-icon">✓</div>
                     <h1>Email Verified Successfully!</h1>
                     <p>Your email address has been verified successfully. You can now login to your account and access all features.</p>
-                    <a href="/login?verified=true" class="login-btn">Go to Login Page</a>
+                    <a href="{login_url}" class="login-btn">Go to Login Page</a>
                 </div>
             </body>
             </html>
-            """
+            """.format(login_url=login_url)
             return HTMLResponse(content=html_content, status_code=200)
         else:
             # For error cases, still return JSON for API compatibility
@@ -106,15 +118,39 @@ async def verify_email(
         logger.error(f"Email verification error: {e}")
         raise HTTPException(status_code=500, detail=f"Email verification failed: {str(e)}")
 
+@router.post("/verify-email")
+async def verify_email_post(
+    payload: VerificationRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    JSON-friendly verification endpoint for SPA/static pages.
+    Mirrors GET /auth/verify-email but returns JSON always.
+    """
+    try:
+        verification_service = EmailVerificationService()
+        result = await verification_service.verify_email(db, payload.email, payload.token)
+        if result["status"] == "verified":
+            return {
+                "status": "verified",
+                "message": "Email verified successfully"
+            }
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Email verification error: {e}")
+        raise HTTPException(status_code=500, detail=f"Email verification failed: {str(e)}")
+
 @router.post("/resend-verification")
 async def resend_verification_email(
-    email: str,
+    payload: ResendVerificationRequest = Body(...),
     db: Session = Depends(get_db)
 ):
     """Resend verification email"""
     try:
         # Find user
-        user = db.query(User).filter(User.email == email).first()
+        user = db.query(User).filter(User.email == payload.email).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -125,7 +161,6 @@ async def resend_verification_email(
             }
 
         # Send verification email
-        from email_verification import EmailVerificationService
         verification_service = EmailVerificationService()
         result = await verification_service.send_verification_email(db, user, resend=True)
 
@@ -145,7 +180,6 @@ async def check_verification_status(
 ):
     """Check email verification status"""
     try:
-        from email_verification import EmailVerificationService
         verification_service = EmailVerificationService()
 
         result = await verification_service.check_verification_status(db, email)

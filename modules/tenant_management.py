@@ -36,7 +36,7 @@ from schemas import (
     TenantAppToggleRequest, TenantDomainCheckRequest,
     TenantDomainCheckResponse
 )
-from keycloak_client import KeycloakClient
+from modules.keycloak_client import KeycloakClient
 from modules.provisioning_events import (
     emit_app_disabled_event,
     emit_app_enabled_event,
@@ -81,7 +81,7 @@ RESERVED_SUBDOMAINS = {
 }
 
 PROVISIONING_READY_STATES = {"ready", "active", "synced"}
-TENANT_ADMIN_ROLES = {"admin", "administrator", "owner", "tenant_admin"}
+TENANT_ADMIN_ROLES = {"tenant_admin", "administrator", "owner"}
 
 def slugify(value: str) -> str:
     value = value.lower()
@@ -354,7 +354,7 @@ def build_app_summary(app_name: str, access: Optional[TenantAppAccess]) -> Tenan
         provisioning_state=provisioning_state,
         dns_status=access.dns_status if access else None,
         provisioning_error=access.provisioning_error if access else None,
-        last_synced_at=access.last_synced_at
+        last_synced_at=access.last_synced_at if access else None
     )
 
 def build_tenant_summary(
@@ -371,10 +371,17 @@ def build_tenant_summary(
 
     apps = [build_app_summary(app_name, app_records.get(app_name)) for app_name in DEFAULT_APPS]
 
-    roles = []
+    roles: List[str] = []
     if user_tenant.app_roles:
-        for role_list in user_tenant.app_roles.values():
-            roles.extend(role_list)
+        app_roles = user_tenant.app_roles
+        if isinstance(app_roles, dict):
+            for role_list in app_roles.values():
+                if isinstance(role_list, list):
+                    roles.extend(role_list)
+                elif isinstance(role_list, str):
+                    roles.append(role_list)
+        elif isinstance(app_roles, list):
+            roles.extend([role for role in app_roles if isinstance(role, str)])
 
     # Calculate member count for this tenant
     member_count = db.query(UserTenant).filter(
@@ -922,6 +929,7 @@ async def quick_create_tenant(
 
     tenant_id = str(uuid.uuid4())
     tenant_domain = ensure_unique_domain(db, request.desired_subdomain or request.company_name)
+    tenant_admin_app_roles = {app: ["admin", "tenant_admin"] for app in DEFAULT_APPS}
     tenant = Tenant(
         id=tenant_id,
         name=request.company_name,
@@ -933,25 +941,18 @@ async def quick_create_tenant(
         is_active=True
     )
     db.add(tenant)
+    db.flush()  # ensure tenant row exists for FK references
 
     await keycloak_client.add_existing_user_to_tenant(
         user_email=user.email,
         tenant_id=tenant_id,
-        app_roles={
-            "darkhole": ["admin"],
-            "darkfolio": ["admin"],
-            "confiploy": ["admin"]
-        }
+        app_roles=tenant_admin_app_roles
     )
 
     user_tenant = UserTenant(
         user_id=user.id,
         tenant_id=tenant_id,
-        app_roles={
-            "darkhole": ["admin"],
-            "darkfolio": ["admin"],
-            "confiploy": ["admin"]
-        },
+        app_roles={app: roles[:] for app, roles in tenant_admin_app_roles.items()},
         status="active",
         joined_at=datetime.utcnow(),
         last_accessed_at=datetime.utcnow()
@@ -982,6 +983,7 @@ async def quick_create_tenant(
         industry=request.industry
     )
     db.add(tenant_settings)
+    db.flush()
 
     db.commit()
     db.refresh(tenant)

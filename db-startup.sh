@@ -4,16 +4,27 @@ set -e
 echo "🚀 Starting Suranku Tenants Service..."
 echo "=================================================="
 
+echo "0️⃣ Ensuring database exists..."
+python3 ensure_database.py || {
+  echo "❌ Failed to ensure database exists"
+  exit 1
+}
+
 # Function to wait for Vault secrets
 wait_for_vault_secrets() {
+    if [[ -n "$KEYCLOAK_ADMIN_USERNAME" && -n "$KEYCLOAK_ADMIN_PASSWORD" && -z "$VAULT_ADMIN_SECRET_FILE_PATH" ]]; then
+        echo "⚙️ Using Keycloak admin credentials from environment; skipping Vault secret wait."
+        return 0
+    fi
+
     echo "⏳ Waiting for Vault secrets to be available..."
     local max_attempts=30
     local attempt=0
 
     while [ $attempt -lt $max_attempts ]; do
-        if [ -f "/vault/secrets/keycloak-admin" ]; then
+        if [ -n "$VAULT_ADMIN_SECRET_FILE_PATH" ] && [ -f "$VAULT_ADMIN_SECRET_FILE_PATH" ]; then
             echo "📂 Loading Keycloak admin credentials from Vault..."
-            source /vault/secrets/keycloak-admin
+            source "$VAULT_ADMIN_SECRET_FILE_PATH"
             echo "✅ Vault secrets loaded!"
             echo "   - KEYCLOAK_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME}"
             echo "   - KEYCLOAK_ADMIN_PASSWORD: [REDACTED]"

@@ -1,0 +1,180 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-policies
+  namespace: tenant-services
+  labels:
+    app.kubernetes.io/component: vault-config
+    app.kubernetes.io/name: tenants-service
+    app.kubernetes.io/part-of: suranku-platform
+data:
+  tenants-service-policy.hcl: |
+    # Tenants Service Vault Policy
+    # Allows full access to tenant-scoped secrets and organization management
+
+    # Full access to tenant secrets
+    path "secret/data/tenants/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+
+    path "secret/metadata/tenants/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+
+    # Allow listing of tenant directories
+    path "secret/metadata/tenants" {
+      capabilities = ["list"]
+    }
+
+    # Full access to all secrets for tenant management
+    path "secret/data/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+
+    path "secret/metadata/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+
+    # Allow token self-lookup for health checks
+    path "auth/token/lookup-self" {
+      capabilities = ["read"]
+    }
+
+    # Allow token renewal
+    path "auth/token/renew-self" {
+      capabilities = ["update"]
+    }
+  setup-vault-policies.sh: |
+    #!/bin/sh
+    set -e
+
+    echo "🔐 Setting up Vault policies for Tenants Service..."
+
+    # Install jq if not available
+    if ! command -v jq >/dev/null 2>&1; then
+      echo "Installing jq..."
+      apk add --no-cache jq
+    fi
+
+    VAULT_ADDR="http://suranku-vault.shared-services.svc.cluster.local:8200"
+    VAULT_ROOT_TOKEN="root"
+
+    # Wait for Vault to be ready
+    echo "⏳ Waiting for Vault to be ready..."
+    until curl -s "${VAULT_ADDR}/v1/sys/health" > /dev/null 2>&1; do
+      echo "Waiting for Vault..."
+      sleep 5
+    done
+
+    # Create the tenants-service policy
+    echo "📝 Creating tenants-service policy..."
+    curl -X PUT \
+      -H "X-Vault-Token: ${VAULT_ROOT_TOKEN}" \
+      -d @- \
+      "${VAULT_ADDR}/v1/sys/policies/acl/tenant-services-policy" << 'EOF'
+    {
+      "policy": "# Tenants Service Vault Policy\n# Allows full access to tenant-scoped secrets and organization management\n\n# Full access to tenant secrets\npath \"secret/data/tenants/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"]\n}\n\npath \"secret/metadata/tenants/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"]\n}\n\n# Allow listing of tenant directories\npath \"secret/metadata/tenants\" {\n  capabilities = [\"list\"]\n}\n\n# Full access to all secrets for tenant management\npath \"secret/data/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"]\n}\n\npath \"secret/metadata/*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"]\n}\n\n# Allow token self-lookup for health checks\npath \"auth/token/lookup-self\" {\n  capabilities = [\"read\"]\n}\n\n# Allow token renewal\npath \"auth/token/renew-self\" {\n  capabilities = [\"update\"]\n}"
+    }
+    EOF
+
+    # Create a service token
+    echo "🔑 Creating service token..."
+    TOKEN_RESPONSE=$(curl -s -X POST \
+      -H "X-Vault-Token: ${VAULT_ROOT_TOKEN}" \
+      -d '{"policies": ["tenant-services-policy"], "display_name": "tenants-service", "ttl": "720h", "renewable": true}' \
+      "${VAULT_ADDR}/v1/auth/token/create")
+
+    NEW_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.auth.client_token')
+
+    if [ "$NEW_TOKEN" = "null" ] || [ -z "$NEW_TOKEN" ]; then
+      echo "❌ Failed to create token"
+      echo "Response: $TOKEN_RESPONSE"
+      exit 1
+    fi
+
+    echo "✅ Created token: $NEW_TOKEN"
+
+    # Update the Kubernetes secret
+    echo "🔄 Updating tenants-secrets with new token..."
+    NEW_TOKEN_B64=$(echo -n "$NEW_TOKEN" | base64 -w 0)
+
+    kubectl patch secret tenants-secrets -n tenant-services --type='json' -p="[{
+      \"op\": \"replace\",
+      \"path\": \"/data/vault-token\",
+      \"value\": \"$NEW_TOKEN_B64\"
+    }]"
+
+    # Test the token
+    echo "🧪 Testing token..."
+    curl -s -H "X-Vault-Token: $NEW_TOKEN" \
+      "${VAULT_ADDR}/v1/auth/token/lookup-self" > /dev/null
+
+    echo "✅ Vault policies setup complete!"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-tenants-policy-setup
+  namespace: tenant-services
+  labels:
+    app.kubernetes.io/component: vault-config
+    app.kubernetes.io/name: tenants-service
+    app.kubernetes.io/part-of: suranku-platform
+  annotations:
+    # Run this job after vault is ready
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: tenant-services-sa
+      containers:
+      - name: vault-policy-setup
+        image: alpine/curl:8.4.0
+        command: ["/bin/sh", "/scripts/setup-vault-policies.sh"]
+        env:
+        - name: VAULT_ADDR
+          value: "http://suranku-vault.shared-services.svc.cluster.local:8200"
+        - name: VAULT_ROOT_TOKEN
+          value: "root"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: shared-bin
+          mountPath: /usr/local/bin
+      initContainers:
+      - name: install-kubectl
+        image: alpine/curl:8.4.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache jq
+          curl -LO "https://dl.k8s.io/release/v1.28.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          mv kubectl /shared/kubectl
+        volumeMounts:
+        - name: shared-bin
+          mountPath: /shared
+      - name: wait-for-vault
+        image: alpine/curl:8.4.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Waiting for Vault to be ready..."
+          until curl -s http://suranku-vault.shared-services.svc.cluster.local:8200/v1/sys/health | grep -q '"sealed":false'; do
+            echo "Vault not ready, waiting..."
+            sleep 10
+          done
+          echo "Vault is ready!"
+      volumes:
+      - name: scripts
+        configMap:
+          name: vault-policies
+          defaultMode: 0755
+      - name: shared-bin
+        emptyDir: {}
