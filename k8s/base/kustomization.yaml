@@ -10,7 +10,6 @@ resources:
 - configmap.yaml
 - secret.yaml
 - blackbox-configmap.yaml
-- vault-policy-job.yaml
 
 commonLabels:
   app.kubernetes.io/name: tenants-service

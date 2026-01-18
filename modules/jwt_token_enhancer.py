@@ -59,7 +59,7 @@ class JWTTokenEnhancer:
 
         # Query user's organization roles
         org_roles = (
-            db.query(OrganizationUserRole)
+            db.query(OrganizationUserRole, Organization, Tenant)
             .join(Organization, OrganizationUserRole.organization_id == Organization.id)
             .join(Tenant, Organization.tenant_id == Tenant.id)
             .filter(OrganizationUserRole.user_id == user.id)
@@ -68,9 +68,7 @@ class JWTTokenEnhancer:
 
         # Group by organization
         org_data = {}
-        for org_role in org_roles:
-            org = org_role.organization
-            tenant = org.tenant
+        for org_role, org, tenant in org_roles:
 
             org_key = str(org.id)
             if org_key not in org_data:

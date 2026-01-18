@@ -4,11 +4,26 @@ set -e
 echo "🚀 Starting Suranku Tenants Service..."
 echo "=================================================="
 
-echo "0️⃣ Ensuring database exists..."
-python3 ensure_database.py || {
-  echo "❌ Failed to ensure database exists"
-  exit 1
+ensure_database_with_retry() {
+    local max_attempts=10
+    local attempt=1
+    local delay=2
+
+    echo "0️⃣ Ensuring database exists..."
+    while [ $attempt -le $max_attempts ]; do
+        if python3 ensure_database.py; then
+            return 0
+        fi
+        echo "   Attempt $attempt/$max_attempts failed, retrying in ${delay}s..."
+        attempt=$((attempt + 1))
+        sleep $delay
+    done
+
+    echo "❌ Failed to ensure database exists after $max_attempts attempts"
+    return 1
 }
+
+ensure_database_with_retry || exit 1
 
 # Function to wait for Vault secrets
 wait_for_vault_secrets() {
@@ -39,8 +54,8 @@ wait_for_vault_secrets() {
     return 1
 }
 
-# Wait for and source Vault-injected secrets
-wait_for_vault_secrets
+# Wait for and source Vault-injected secrets (do not fail startup if Vault isn't ready)
+wait_for_vault_secrets || true
 
 # Function to wait for database
 wait_for_db() {
@@ -57,7 +72,7 @@ delay = 2
 
 for attempt in range(max_retries):
     try:
-        engine = create_engine(database_url)
+        engine = create_engine(database_url, connect_args={'connect_timeout': 3})
         with engine.connect() as conn:
             conn.execute(text('SELECT 1'))
         print('✅ Database is ready!')

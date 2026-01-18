@@ -117,6 +117,40 @@ class DirectoryToPlatformSyncService:
             # Commit all changes
             self.db.commit()
 
+            # Sync directory users' Keycloak attributes after role changes
+            # This ensures JWT tokens include updated organization app roles
+            try:
+                from modules.user_attribute_sync import user_attribute_sync
+
+                # Get all users who had roles synced in this batch
+                synced_users = self.db.query(OrganizationUserRole).filter(
+                    OrganizationUserRole.sync_batch_id == active_sync_batch_id
+                ).all()
+
+                # Get unique users and sync their Keycloak attributes
+                user_ids = set(role_entry.user_id for role_entry in synced_users)
+                synced_user_count = 0
+
+                import asyncio
+                for user_id in user_ids:
+                    try:
+                        user = self.db.query(User).filter(User.id == user_id).first()
+                        if user and user.keycloak_id:
+                            # Background task to sync attributes
+                            asyncio.create_task(
+                                user_attribute_sync.sync_user_org_memberships(user.keycloak_id)
+                            )
+                            synced_user_count += 1
+                            logger.info(f"Queued Keycloak attribute sync for directory user {user.email}")
+                    except Exception as e:
+                        logger.warning(f"Failed to queue Keycloak sync for user {user_id}: {e}")
+
+                if synced_user_count > 0:
+                    logger.info(f"Queued Keycloak attribute sync for {synced_user_count} directory users")
+
+            except Exception as e:
+                logger.warning(f"Failed to sync directory users to Keycloak: {e}")
+
             # Build summary message
             message_parts = []
             if sync_users:

@@ -1382,3 +1382,136 @@ class KeycloakClient:
         except Exception as e:
             logger.error(f"Error updating user {user_id}: {e}")
             return False
+
+    async def ensure_client_org_mappers(self, client_id: str) -> Dict[str, str]:
+        """
+        Ensure organization-scoped protocol mappers exist for a Keycloak client
+        This method integrates with the protocol mappers module
+        """
+        try:
+            # Import here to avoid circular imports
+            from modules.keycloak_protocol_mappers import protocol_mappers
+
+            logger.info(f"Ensuring org-scoped protocol mappers for client: {client_id}")
+            mappers = await protocol_mappers.ensure_org_mappers_for_client(client_id)
+
+            if mappers:
+                logger.info(f"Successfully configured {len(mappers)} org mappers for {client_id}")
+                return mappers
+            else:
+                logger.warning(f"No org mappers configured for {client_id}")
+                return {}
+
+        except Exception as e:
+            logger.error(f"Error ensuring org mappers for {client_id}: {e}")
+            return {}
+
+    async def create_app_client_with_org_mappers(
+        self,
+        client_id: str,
+        client_name: str,
+        redirect_uris: List[str],
+        web_origins: List[str] = None,
+        enable_org_scoped_auth: bool = True
+    ) -> Optional[str]:
+        """
+        Create a Keycloak client with organization-scoped authentication mappers
+
+        Args:
+            client_id: Unique client identifier (e.g., "darkhole-client")
+            client_name: Human readable name
+            redirect_uris: List of valid redirect URIs
+            web_origins: List of valid web origins (defaults to redirect URIs)
+            enable_org_scoped_auth: Whether to create org-scoped mappers
+
+        Returns:
+            Client UUID if successful, None otherwise
+        """
+        try:
+            token = await self.get_admin_token()
+
+            if web_origins is None:
+                web_origins = redirect_uris
+
+            client_config = {
+                "clientId": client_id,
+                "name": client_name,
+                "protocol": "openid-connect",
+                "enabled": True,
+                "publicClient": False,
+                "standardFlowEnabled": True,
+                "implicitFlowEnabled": False,
+                "directAccessGrantsEnabled": True,
+                "serviceAccountsEnabled": True,
+                "authorizationServicesEnabled": False,
+                "redirectUris": redirect_uris,
+                "webOrigins": web_origins,
+                "attributes": {
+                    "saml.assertion.signature": "false",
+                    "saml.multivalued.roles": "false",
+                    "saml.force.post.binding": "false",
+                    "saml.encrypt": "false",
+                    "saml.server.signature": "false",
+                    "saml.server.signature.keyinfo.ext": "false",
+                    "exclude.session.state.from.auth.response": "false",
+                    "saml_force_name_id_format": "false",
+                    "saml.client.signature": "false",
+                    "tls.client.certificate.bound.access.tokens": "false",
+                    "saml.authnstatement": "false",
+                    "display.on.consent.screen": "false",
+                    "saml.onetimeuse.condition": "false"
+                }
+            }
+
+            async with httpx.AsyncClient() as client:
+                # Create the client
+                response = await client.post(
+                    f"{self.base_url}/admin/realms/{self.realm}/clients",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json"
+                    },
+                    json=client_config
+                )
+
+                if response.status_code == 201:
+                    # Extract client UUID from Location header
+                    location = response.headers.get("Location", "")
+                    client_uuid = location.split("/")[-1] if location else None
+
+                    logger.info(f"Created Keycloak client: {client_id} with UUID: {client_uuid}")
+
+                    # Create organization-scoped protocol mappers if enabled
+                    if enable_org_scoped_auth and client_uuid:
+                        logger.info(f"Creating org-scoped mappers for {client_id}")
+                        mappers = await self.ensure_client_org_mappers(client_id)
+
+                        if mappers:
+                            logger.info(f"Successfully added org mappers: {list(mappers.keys())}")
+                        else:
+                            logger.warning(f"Failed to add org mappers for {client_id}")
+
+                    return client_uuid
+
+                else:
+                    logger.error(f"Failed to create client {client_id}: {response.status_code} - {response.text}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Error creating client {client_id}: {e}")
+            return None
+
+    async def update_client_org_mappers(self, client_id: str) -> bool:
+        """
+        Update organization-scoped mappers for an existing client
+        Useful when mapper configuration changes
+        """
+        try:
+            logger.info(f"Updating org mappers for existing client: {client_id}")
+            mappers = await self.ensure_client_org_mappers(client_id)
+
+            return len(mappers) > 0
+
+        except Exception as e:
+            logger.error(f"Error updating org mappers for {client_id}: {e}")
+            return False

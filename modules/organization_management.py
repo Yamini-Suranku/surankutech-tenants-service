@@ -16,7 +16,7 @@ from shared.auth import (
     get_current_token_data,
     require_platform_admin_access,
 )
-from shared.models import Tenant, UserTenant, TenantAppAccess, AuditLog
+from shared.models import Tenant, UserTenant, TenantAppAccess, AuditLog, User
 from models import Organization, OrganizationAppAccess, OrganizationUserRole
 from schemas import (
     OrganizationCreateRequest,
@@ -668,6 +668,36 @@ async def enable_organization_app(
         org_subdomain,
         org_zone,
     )
+
+    # Sync user attributes to Keycloak after enabling app for organization
+    # This ensures JWT tokens include the new organization app access
+    if app_id == "darkhole" and organization:
+        try:
+            from modules.user_attribute_sync import user_attribute_sync
+
+            # Get all users with roles in this organization and sync them
+            org_user_roles = db.query(OrganizationUserRole).filter(
+                OrganizationUserRole.organization_id == organization.id,
+                OrganizationUserRole.app_name == app_id
+            ).all()
+
+            # Background sync for all affected users
+            import asyncio
+            for role_entry in org_user_roles:
+                try:
+                    target_user = db.query(User).filter(User.id == role_entry.user_id).first()
+                    if target_user and target_user.keycloak_id:
+                        asyncio.create_task(
+                            user_attribute_sync.sync_user_org_memberships(target_user.keycloak_id)
+                        )
+                        logger.info(f"Queued attribute sync for {target_user.email} after enabling {app_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to queue sync for user {role_entry.user_id}: {e}")
+
+            logger.info(f"Queued attribute sync for {len(org_user_roles)} users after enabling {app_id}")
+
+        except Exception as e:
+            logger.warning(f"Failed to sync user attributes after enabling app {app_id}: {e}")
 
     return {
         "status": "enabled",

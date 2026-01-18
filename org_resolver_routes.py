@@ -107,12 +107,15 @@ async def resolve_organization_by_hostname(
 
         app_access = {}
         for access in app_access_records:
+            enabled_features = []
+            if access.metadata_json and isinstance(access.metadata_json, dict):
+                enabled_features = access.metadata_json.get("enabled_features") or []
             app_access[access.app_name] = {
                 "enabled": access.is_enabled,
                 "ingress_hostname": access.ingress_hostname,
                 "provisioning_state": access.provisioning_state,
                 "dns_status": access.dns_status,
-                "enabled_features": access.enabled_features or [],
+                "enabled_features": enabled_features,
                 "last_synced_at": access.last_synced_at.isoformat() if access.last_synced_at else None
             }
 

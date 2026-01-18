@@ -16,4 +16,4 @@ namespace: tenant-services
 # Imagest
 images:
 - name: surankutech-tenants-service
-  newTag: v0.8
+  newTag: v0.15

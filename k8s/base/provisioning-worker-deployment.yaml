@@ -19,7 +19,6 @@ spec:
         # Vault Agent Injection annotations
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "tenant-services-role"
-        vault.hashicorp.com/agent-inject-status: "update"
         vault.hashicorp.com/agent-inject-secret-keycloak-admin: "secret/data/keycloak/platform/admin"
         vault.hashicorp.com/agent-inject-template-keycloak-admin: |
           {{- with secret "secret/data/keycloak/platform/admin" -}}
@@ -31,7 +30,7 @@ spec:
       serviceAccountName: tenant-services-sa
       containers:
       - name: provisioning-worker
-        image: surankutech-tenants-service:v0.8
+        image: surankutech-tenants-service:v0.15
         workingDir: /app
         command: ["python3", "-m", "workers.provisioning_worker"]
         env:
@@ -107,6 +106,20 @@ spec:
           value: "true"
         - name: PROVISIONING_STATIC_APPS_PREFIX
           value: "/platform-apps/apps"
+        - name: PROVISIONING_API_TARGET_PATH
+          value: "/api"
+        - name: PROVISIONING_SHARED_ASSETS_ENABLED
+          value: "true"
+        - name: PROVISIONING_SHARED_ASSETS_SERVICE
+          value: "suranku-minio"
+        - name: PROVISIONING_SHARED_ASSETS_PORT
+          value: "9000"
+        - name: PROVISIONING_SHARED_ASSETS_PATH
+          value: "/shared"
+        - name: PROVISIONING_SHARED_ASSETS_TARGET_PATH
+          value: "/platform-apps/apps/{app}/shared"
+        - name: PROVISIONING_SCOPE_PATHS_PER_APP
+          value: "true"
         # DNS configuration for domain provisioning
         - name: LOCAL_DATA_PLANE_DOMAIN
           value: "local.suranku"

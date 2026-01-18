@@ -6,7 +6,7 @@ metadata:
     app: tenants-service
     tier: backend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: tenants-service
@@ -19,7 +19,6 @@ spec:
         # Vault Agent Injection annotations
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "tenant-services-role"
-        vault.hashicorp.com/agent-inject-status: "update"
         vault.hashicorp.com/agent-inject-secret-keycloak-admin: "secret/data/keycloak/platform/admin"
         vault.hashicorp.com/agent-inject-template-keycloak-admin: |
           {{- with secret "secret/data/keycloak/platform/admin" -}}
@@ -31,7 +30,7 @@ spec:
       serviceAccountName: tenant-services-sa
       containers:
       - name: tenants-service
-        image: surankutech-tenants-service:v0.8
+        image: surankutech-tenants-service:v0.15
         ports:
         - containerPort: 8000
           name: http
@@ -204,11 +203,11 @@ spec:
           value: "vault"
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "100m"
+            memory: "128Mi"
+            cpu: "50m"
           limits:
-            memory: "512Mi"
-            cpu: "510m"
+            memory: "256Mi"
+            cpu: "250m"
         livenessProbe:
           httpGet:
             path: /health

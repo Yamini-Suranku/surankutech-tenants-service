@@ -5,6 +5,7 @@ Clean, modular FastAPI application using organized modules
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import os
 import logging
 from datetime import datetime
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -50,18 +51,30 @@ app = FastAPI(
 Instrumentator().instrument(app).expose(app)
 
 # CORS middleware for frontend access
+default_allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:8000",  # Kong Gateway frontend access
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:3002",
+    "http://127.0.0.1:8000",  # Kong Gateway frontend access
+    "https://home.local.suranku",
+    "https://id.local.suranku",
+    "https://api.local.suranku",
+    "https://palls.local.suranku",
+]
+
+additional_origins = os.getenv("CORS_ALLOW_ORIGINS")
+if additional_origins:
+    default_allowed_origins.extend(
+        origin.strip() for origin in additional_origins.split(",") if origin.strip()
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:3002",
-        "http://localhost:8000",  # Kong Gateway frontend access
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:3002",
-        "http://127.0.0.1:8000"  # Kong Gateway frontend access
-    ],
+    allow_origins=default_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
@@ -77,6 +90,40 @@ async def health_check():
         "version": "2.0.0",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+@app.post("/api/admin/setup-org-mappers")
+async def setup_org_mappers_endpoint():
+    """
+    Manually trigger setup of organization-scoped protocol mappers
+    Use this endpoint if automatic startup setup failed
+    """
+    try:
+        from modules.keycloak_client import KeycloakClient
+
+        keycloak_client = KeycloakClient()
+        mappers = await keycloak_client.ensure_client_org_mappers("darkhole-client")
+
+        if mappers:
+            return {
+                "status": "success",
+                "message": f"Organization-scoped mappers configured successfully",
+                "mappers_configured": list(mappers.keys()),
+                "client_id": "darkhole-client"
+            }
+        else:
+            return {
+                "status": "warning",
+                "message": "No mappers were created (they may already exist)",
+                "mappers_configured": [],
+                "client_id": "darkhole-client"
+            }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to setup organization mappers: {str(e)}",
+            "suggestion": "Check Keycloak connectivity and darkhole-client exists"
+        }
 
 # Include all module routers
 app.include_router(tenant_router)           # /tenants/*
@@ -168,6 +215,24 @@ async def startup_event():
     logger.info("🌐 Social authentication enabled")
     logger.info("📁 File storage with MinIO enabled")
     logger.info("🔐 LDAP/AD sync enabled")
+
+    # Auto-setup organization-scoped protocol mappers on startup
+    try:
+        logger.info("🔧 Setting up organization-scoped protocol mappers...")
+        from modules.keycloak_client import KeycloakClient
+
+        keycloak_client = KeycloakClient()
+        mappers = await keycloak_client.ensure_client_org_mappers("darkhole-client")
+
+        if mappers:
+            logger.info(f"✅ Organization-scoped mappers configured: {list(mappers.keys())}")
+        else:
+            logger.warning("⚠️  No organization mappers configured - DarkHole may not work properly")
+
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to auto-setup org mappers: {e}")
+        logger.info("💡 Run manually: python scripts/setup_org_scoped_mappers.py")
+
     logger.info("✅ Tenants Service ready!")
 
 # Application shutdown event

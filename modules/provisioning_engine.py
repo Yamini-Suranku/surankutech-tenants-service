@@ -93,6 +93,10 @@ class ProvisioningEngine:
         self.api_proxy_service = os.getenv("PROVISIONING_API_PROXY_SERVICE", "kong-gateway").strip()
         self.api_proxy_port = int(os.getenv("PROVISIONING_API_PROXY_PORT", "80"))
         self.api_path_prefix = os.getenv("PROVISIONING_API_PATH_PREFIX", "/api")
+        self.api_target_prefix = os.getenv("PROVISIONING_API_TARGET_PATH", self.api_path_prefix)
+        self.org_api_proxy_enabled = os.getenv("PROVISIONING_ORG_API_PROXY_ENABLED", "true").lower() == "true"
+        self.org_api_path_prefix = os.getenv("PROVISIONING_ORG_API_PATH_PREFIX", self.api_path_prefix)
+        self.org_api_target_prefix = os.getenv("PROVISIONING_ORG_API_TARGET_PATH", self.org_api_path_prefix)
         self.shared_assets_enabled = os.getenv("PROVISIONING_SHARED_ASSETS_ENABLED", "true").lower() == "true"
         self.shared_assets_service = os.getenv(
             "PROVISIONING_SHARED_ASSETS_SERVICE",
@@ -102,6 +106,11 @@ class ProvisioningEngine:
             os.getenv("PROVISIONING_SHARED_ASSETS_PORT", str(self.api_proxy_port))
         )
         self.shared_assets_path_prefix = os.getenv("PROVISIONING_SHARED_ASSETS_PATH", "/shared")
+        self.shared_assets_target_prefix = os.getenv(
+            "PROVISIONING_SHARED_ASSETS_TARGET_PATH",
+            self.shared_assets_path_prefix,
+        )
+        self.scope_paths_per_app = os.getenv("PROVISIONING_SCOPE_PATHS_PER_APP", "false").lower() == "true"
 
     def provision_app(
         self,
@@ -214,23 +223,47 @@ class ProvisioningEngine:
                 namespace=self.shared_namespace,
                 base_name=base_name,
             )
+            self._apply_shared_assets_ingress(
+                context,
+                hostname,
+                namespace=self.shared_namespace,
+                base_name=base_name,
+            )
             return
         else:
-            ingress_manifest = self._build_ingress_yaml(
+            manifests = []
+            manifests.append(self._build_ingress_yaml(
                 name=base_name,
                 namespace=self.shared_namespace,
                 hostname=hostname,
                 service_name=self.shared_service,
                 service_port=self.shared_service_port,
-                path_prefix=f"/{context.app_name}"
-            )
-        logger.debug("Applying ingress manifest:\n%s", ingress_manifest)
-        _kubectl(["apply", "-f", "-"], payload=ingress_manifest)
+                path_prefix=f"/{context.app_name}",
+            ))
+            llmchat_target = f"/{context.app_name}/pages/llmchat.html"
+            manifests.append(self._build_ingress_yaml(
+                name=f"{base_name}-root",
+                namespace=self.shared_namespace,
+                hostname=hostname,
+                service_name=self.shared_service,
+                service_port=self.shared_service_port,
+                path_prefix=f"/{context.app_name}/",
+                path_type="Exact",
+                rewrite_target=llmchat_target,
+            ))
+            for manifest in manifests:
+                logger.debug("Applying ingress manifest:\n%s", manifest)
+                _kubectl(["apply", "-f", "-"], payload=manifest)
         self._apply_api_proxy_ingress(
             context,
             hostname,
             namespace=self.shared_namespace,
             base_name=base_name,
+        )
+        self._apply_org_api_proxy_ingress(
+            context,
+            hostname,
+            namespace=self.shared_namespace,
         )
         self._apply_shared_assets_ingress(
             context,
@@ -267,6 +300,11 @@ class ProvisioningEngine:
             hostname,
             namespace=namespace,
             base_name=base_name,
+        )
+        self._apply_org_api_proxy_ingress(
+            context,
+            hostname,
+            namespace=namespace,
         )
         self._apply_shared_assets_ingress(
             context,
@@ -306,6 +344,10 @@ class ProvisioningEngine:
     def _ingress_name(self, context: ProvisioningContext, hostname: str) -> str:
         host_slug = _slugify(hostname.replace(".", "-"))
         return f"ingress-{context.app_name}-{host_slug[:32]}"
+
+    def _org_api_ingress_name(self, hostname: str) -> str:
+        host_slug = _slugify(hostname.replace(".", "-"))
+        return f"ingress-org-{host_slug[:32]}-api"
 
     def _build_ingress_yaml(
         self,
@@ -451,20 +493,48 @@ spec:
         if not self._api_proxy_active():
             return
         ingress_base = base_name or self._ingress_name(context, hostname)
+        path_prefix = self._api_proxy_path(context)
         ingress_manifest = self._build_ingress_yaml(
             name=f"{ingress_base}-api",
             namespace=namespace,
             hostname=hostname,
             service_name=self.api_proxy_service,
             service_port=self.api_proxy_port,
-            path_prefix=self.api_path_prefix,
-            path_type="Prefix",
+            path_prefix=path_prefix,
+            use_regex=self._api_proxy_use_regex(),
+            rewrite_target=self._api_proxy_rewrite_target(context),
+            path_type=None,
         )
         logger.debug("Applying API proxy ingress manifest:\n%s", ingress_manifest)
         _kubectl(["apply", "-f", "-"], payload=ingress_manifest)
 
     def _api_proxy_active(self) -> bool:
         return self.api_proxy_enabled and bool(self.api_proxy_service)
+
+    def _apply_org_api_proxy_ingress(
+        self,
+        context: ProvisioningContext,
+        hostname: str,
+        namespace: str,
+    ) -> None:
+        if not self._org_api_proxy_active():
+            return
+        ingress_manifest = self._build_ingress_yaml(
+            name=self._org_api_ingress_name(hostname),
+            namespace=namespace,
+            hostname=hostname,
+            service_name=self.api_proxy_service,
+            service_port=self.api_proxy_port,
+            path_prefix=self._org_api_proxy_path(),
+            use_regex=self._org_api_proxy_use_regex(),
+            rewrite_target=self._org_api_proxy_rewrite_target(),
+            path_type="Prefix",
+        )
+        logger.debug("Applying org API proxy ingress manifest:\n%s", ingress_manifest)
+        _kubectl(["apply", "-f", "-"], payload=ingress_manifest)
+
+    def _org_api_proxy_active(self) -> bool:
+        return self.org_api_proxy_enabled and bool(self.api_proxy_service)
 
     def _apply_shared_assets_ingress(
         self,
@@ -482,7 +552,9 @@ spec:
             hostname=hostname,
             service_name=self.shared_assets_service,
             service_port=self.shared_assets_port,
-            path_prefix=self.shared_assets_path_prefix,
+            path_prefix=self._shared_assets_path(context),
+            use_regex=self._shared_assets_use_regex(),
+            rewrite_target=self._shared_assets_rewrite_target(context),
             path_type="Prefix",
         )
         logger.debug("Applying shared assets ingress manifest:\n%s", ingress_manifest)
@@ -492,3 +564,80 @@ spec:
         return self.shared_assets_enabled and bool(self.shared_assets_service) and bool(
             self.shared_assets_path_prefix
         )
+
+    def _scoped_path_prefix(self, base_prefix: str, context: ProvisioningContext) -> str:
+        """Return ingress path for API/shared assets, optionally scoped per app."""
+        prefix = (base_prefix or "/").strip()
+        if not prefix.startswith("/"):
+            prefix = f"/{prefix}"
+        if not self.scope_paths_per_app:
+            return prefix or "/"
+        app_segment = f"/{_slugify(context.app_name)}"
+        suffix = prefix.lstrip("/")
+        combined = f"{app_segment}/{suffix}" if suffix else app_segment
+        combined = combined.replace("//", "/")
+        return combined or "/"
+
+    def _api_proxy_use_regex(self) -> bool:
+        return self.scope_paths_per_app or (self.api_target_prefix != self.api_path_prefix)
+
+    def _api_proxy_path(self, context: ProvisioningContext) -> str:
+        scoped_path = self._scoped_path_prefix(self.api_path_prefix, context)
+        if not self._api_proxy_use_regex():
+            return scoped_path
+        prefix = scoped_path.rstrip("/") or "/"
+        return f"{prefix}(/|$)(.*)"
+
+    def _api_proxy_rewrite_target(self, context: ProvisioningContext) -> Optional[str]:
+        if not self._api_proxy_use_regex():
+            return None
+        target = (self.api_target_prefix or "/").rstrip("/")
+        if self.scope_paths_per_app and self.api_target_prefix == self.api_path_prefix:
+            app_slug = _slugify(context.app_name)
+            target = f"{target}/{app_slug}"
+        if not target:
+            return "/$2"
+        return f"{target}/$2"
+
+    def _org_api_proxy_use_regex(self) -> bool:
+        return self.org_api_target_prefix != self.org_api_path_prefix
+
+    def _org_api_proxy_path(self) -> str:
+        prefix = (self.org_api_path_prefix or "/").strip()
+        if not prefix.startswith("/"):
+            prefix = f"/{prefix}"
+        if not self._org_api_proxy_use_regex():
+            return prefix
+        prefix = prefix.rstrip("/") or "/"
+        return f"{prefix}(/|$)(.*)"
+
+    def _org_api_proxy_rewrite_target(self) -> Optional[str]:
+        if not self._org_api_proxy_use_regex():
+            return None
+        target = (self.org_api_target_prefix or "/").rstrip("/")
+        if not target:
+            return "/$2"
+        return f"{target}/$2"
+
+    def _shared_assets_path(self, context: ProvisioningContext) -> str:
+        if self.shared_assets_target_prefix == self.shared_assets_path_prefix:
+            return self._scoped_path_prefix(self.shared_assets_path_prefix, context)
+        return self._build_shared_regex_path(context)
+
+    def _shared_assets_use_regex(self) -> bool:
+        return self.shared_assets_target_prefix != self.shared_assets_path_prefix
+
+    def _shared_assets_rewrite_target(self, context: ProvisioningContext) -> Optional[str]:
+        if not self._shared_assets_use_regex():
+            return None
+        target_template = (self.shared_assets_target_prefix or "/").rstrip("/")
+        app_slug = _slugify(context.app_name)
+        target = target_template.replace("{app}", app_slug)
+        if not target:
+            return "/$2"
+        return f"{target}/$2"
+
+    def _build_shared_regex_path(self, context: ProvisioningContext) -> str:
+        prefix = self._scoped_path_prefix(self.shared_assets_path_prefix, context).rstrip("/")
+        prefix = prefix or "/"
+        return f"{prefix}(/|$)(.*)"

@@ -28,7 +28,11 @@ def ensure_database():
         return
 
     admin_url = url.set(database="postgres")
-    engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    engine = create_engine(
+        admin_url,
+        isolation_level="AUTOCOMMIT",
+        connect_args={"connect_timeout": 3},
+    )
     try:
         with engine.connect() as conn:
             exists = conn.execute(

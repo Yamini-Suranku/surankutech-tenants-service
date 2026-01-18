@@ -172,8 +172,13 @@ def seed_app_access_metadata(app_access: TenantAppAccess, tenant: Tenant, app_na
 def user_has_tenant_admin(user_tenant: Optional[UserTenant]) -> bool:
     if not user_tenant or not user_tenant.app_roles:
         return False
-    for roles in user_tenant.app_roles.values():
-        if any(role in TENANT_ADMIN_ROLES for role in roles):
+    app_roles = user_tenant.app_roles
+    if isinstance(app_roles, dict):
+        for roles in app_roles.values():
+            if any(role in TENANT_ADMIN_ROLES for role in roles):
+                return True
+    elif isinstance(app_roles, list):
+        if any(role in TENANT_ADMIN_ROLES for role in app_roles):
             return True
     return False
 

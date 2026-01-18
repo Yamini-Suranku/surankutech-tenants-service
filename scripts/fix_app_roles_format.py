@@ -31,7 +31,7 @@ def fix_app_roles_format():
         cur.execute("""
             SELECT id, app_roles
             FROM user_tenants
-            WHERE jsonb_typeof(app_roles) = 'array'
+            WHERE json_typeof(app_roles) = 'array'
         """)
 
         problematic_records = cur.fetchall()
@@ -74,7 +74,7 @@ def fix_app_roles_format():
         cur.execute("""
             SELECT id, app_roles
             FROM user_tenants
-            WHERE jsonb_typeof(app_roles) = 'array'
+            WHERE json_typeof(app_roles) = 'array'
         """)
 
         remaining_problematic = cur.fetchall()

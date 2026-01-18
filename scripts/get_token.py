@@ -17,7 +17,7 @@ DEFAULT_EMAIL = "yamini.sk@suranku.com"
 DEFAULT_PASSWORD = "Time2show@25"
 
 def get_auth_token(email: str = DEFAULT_EMAIL, password: str = DEFAULT_PASSWORD,
-                   api_base: str = DEFAULT_API_BASE) -> Optional[str]:
+                   api_base: str = DEFAULT_API_BASE, verify_tls: bool = True) -> Optional[str]:
     """
     Get authentication token from the tenants service.
 
@@ -42,7 +42,13 @@ def get_auth_token(email: str = DEFAULT_EMAIL, password: str = DEFAULT_PASSWORD,
 
     try:
         print(f"🔐 Authenticating with {email}...")
-        response = requests.post(login_url, json=payload, headers=headers, timeout=10)
+        response = requests.post(
+            login_url,
+            json=payload,
+            headers=headers,
+            timeout=10,
+            verify=verify_tls
+        )
 
         if response.status_code == 200:
             data = response.json()
@@ -76,7 +82,7 @@ def get_auth_token(email: str = DEFAULT_EMAIL, password: str = DEFAULT_PASSWORD,
         print(f"❌ Unexpected error: {e}")
         return None
 
-def test_organization_endpoints(token: str, tenant_id: str, api_base: str = DEFAULT_API_BASE):
+def test_organization_endpoints(token: str, tenant_id: str, api_base: str = DEFAULT_API_BASE, verify_tls: bool = True):
     """
     Test organization management endpoints with the provided token.
 
@@ -96,7 +102,7 @@ def test_organization_endpoints(token: str, tenant_id: str, api_base: str = DEFA
     print("📋 Testing organization list...")
     try:
         response = requests.get(f"{api_base}/api/tenants/{tenant_id}/organizations",
-                              headers=headers, timeout=10)
+                              headers=headers, timeout=10, verify=verify_tls)
         if response.status_code == 200:
             orgs = response.json().get('organizations', [])
             print(f"   ✅ Found {len(orgs)} organizations")
@@ -111,7 +117,7 @@ def test_organization_endpoints(token: str, tenant_id: str, api_base: str = DEFA
     print("📱 Testing organization apps...")
     try:
         response = requests.get(f"{api_base}/api/tenants/{tenant_id}/organizations/default/apps",
-                              headers=headers, timeout=10)
+                              headers=headers, timeout=10, verify=verify_tls)
         if response.status_code == 200:
             data = response.json()
             available = data.get('available_apps', [])
@@ -132,6 +138,8 @@ def main():
     parser.add_argument('--email', default=DEFAULT_EMAIL, help='Email address')
     parser.add_argument('--password', default=DEFAULT_PASSWORD, help='Password')
     parser.add_argument('--api-base', default=DEFAULT_API_BASE, help='Base API URL')
+    parser.add_argument('--insecure', action='store_true',
+                        help='Disable TLS verification (use for local certs)')
     parser.add_argument('--test', action='store_true', help='Test organization endpoints')
     parser.add_argument('--tenant-id', help='Tenant ID for testing (required with --test)')
     parser.add_argument('--output', choices=['token', 'json', 'export'], default='token',
@@ -140,7 +148,8 @@ def main():
     args = parser.parse_args()
 
     # Get token
-    token = get_auth_token(args.email, args.password, args.api_base)
+    verify_tls = not args.insecure
+    token = get_auth_token(args.email, args.password, args.api_base, verify_tls=verify_tls)
 
     if not token:
         print("❌ Failed to get authentication token")
@@ -162,7 +171,7 @@ def main():
         if not args.tenant_id:
             print("❌ --tenant-id is required when using --test")
             sys.exit(1)
-        test_organization_endpoints(token, args.tenant_id, args.api_base)
+        test_organization_endpoints(token, args.tenant_id, args.api_base, verify_tls=verify_tls)
 
 if __name__ == "__main__":
     main()

@@ -234,6 +234,20 @@ async def update_org_roles(
 
     db.commit()
 
+    # Auto-sync user attributes to Keycloak after role changes
+    try:
+        from modules.user_attribute_sync import user_attribute_sync
+        from shared.models import User
+
+        target_user = db.query(User).filter(User.id == target_user_id).first()
+        if target_user and target_user.keycloak_id:
+            # Background task to sync attributes - don't block the request
+            import asyncio
+            asyncio.create_task(user_attribute_sync.sync_user_org_memberships(target_user.keycloak_id))
+            logger.info(f"Queued attribute sync for user {target_user.email} after org role change")
+    except Exception as e:
+        logger.warning(f"Failed to queue user attribute sync: {e}")
+
     new_roles = db.query(OrganizationUserRole).filter(
         OrganizationUserRole.organization_id == org_id,
         OrganizationUserRole.user_id == target_user_id,
