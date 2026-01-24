@@ -231,7 +231,7 @@ async def startup_event():
 
     except Exception as e:
         logger.warning(f"⚠️  Failed to auto-setup org mappers: {e}")
-        logger.info("💡 Run manually: python scripts/setup_org_scoped_mappers.py")
+        logger.info("💡 Run manually: python scripts/setup_unified_org_mappers.py")
 
     logger.info("✅ Tenants Service ready!")
 

@@ -37,6 +37,8 @@ class UserAttributeSyncService:
             tenant_id = enhanced_data.get("tenant_id")
             all_tenants = enhanced_data.get("all_tenants", [])
             app_roles = enhanced_data.get("app_roles", {})
+            org_app_roles = self._build_org_app_roles(org_memberships)
+            current_org = self._derive_current_org_slug(org_memberships)
 
             # Get user data for bulk update
             user_data = await self.keycloak_client.get_user_by_id(user_keycloak_id)
@@ -60,6 +62,14 @@ class UserAttributeSyncService:
             # Sync app_roles
             attributes["app_roles"] = [json.dumps(app_roles, separators=(',', ':'))]
 
+            # Sync org-scoped app roles (for org-specific access checks)
+            if org_app_roles is not None:
+                attributes["org_app_roles"] = [json.dumps(org_app_roles, separators=(',', ':'))]
+
+            # Sync current org slug if determinable
+            if current_org:
+                attributes["current_org"] = [current_org]
+
             # Bulk update user attributes in Keycloak
             update_data = {"attributes": attributes}
             success = await self.keycloak_client.update_user(user_keycloak_id, update_data)
@@ -70,6 +80,8 @@ class UserAttributeSyncService:
                 logger.info(f"  - All tenants: {all_tenants}")
                 logger.info(f"  - App roles: {list(app_roles.keys())}")
                 logger.info(f"  - Org memberships: {len(org_memberships)}")
+                if current_org:
+                    logger.info(f"  - Current org: {current_org}")
                 return True
             else:
                 logger.error(f"Failed to sync enhanced token data for user {user_keycloak_id}")
@@ -108,6 +120,31 @@ class UserAttributeSyncService:
         except Exception as e:
             logger.error(f"Error updating user attribute {attribute_name} for {user_keycloak_id}: {e}")
             return False
+
+    @staticmethod
+    def _build_org_app_roles(org_memberships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Build org_app_roles claim from org memberships."""
+        org_app_roles = []
+        for membership in org_memberships or []:
+            org_slug = membership.get("org_slug") or membership.get("dns_subdomain")
+            app_roles = membership.get("app_roles") or {}
+            if not org_slug or not app_roles:
+                continue
+            for app_name, roles in app_roles.items():
+                org_app_roles.append({
+                    "org_slug": org_slug,
+                    "app": app_name,
+                    "roles": roles or []
+                })
+        return org_app_roles
+
+    @staticmethod
+    def _derive_current_org_slug(org_memberships: List[Dict[str, Any]]) -> Optional[str]:
+        """Pick a stable org slug for current_org when available."""
+        if not org_memberships:
+            return None
+        membership = org_memberships[0]
+        return membership.get("org_slug") or membership.get("dns_subdomain")
 
     async def sync_all_users_org_memberships(self) -> Dict[str, Any]:
         """
