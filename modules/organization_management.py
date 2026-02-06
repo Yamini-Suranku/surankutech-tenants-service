@@ -975,6 +975,7 @@ async def list_organization_users(
 
         users.append({
             "id": user.id,
+            "keycloak_id": user.keycloak_id,
             "email": user.email,
             "first_name": user.first_name,
             "last_name": user.last_name,
@@ -1015,6 +1016,7 @@ async def list_organization_users(
 
                 users.append({
                     "id": dir_user.id,  # Use directory user ID for now
+                    "keycloak_id": platform_user.keycloak_id if platform_user else None,
                     "email": dir_user.email,
                     "first_name": dir_user.first_name,
                     "last_name": dir_user.last_name,
