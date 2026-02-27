@@ -9,6 +9,7 @@ import os
 import logging
 from datetime import datetime
 from prometheus_fastapi_instrumentator import Instrumentator
+from shared.database import get_db, SessionLocal
 
 # Import all module routers
 from modules.tenant_management import router as tenant_router
@@ -75,6 +76,9 @@ if additional_origins:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=default_allowed_origins,
+    # Allow dynamic org data-plane and control-plane subdomains.
+    # Example: https://acme.suranku.net, https://platform.suranku.com
+    allow_origin_regex=r"^https:\/\/([a-z0-9-]+\.)*suranku\.(net|com)$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
@@ -153,7 +157,6 @@ async def legacy_login_endpoint(request: dict):
     """Legacy login endpoint - redirects to main auth login"""
     from modules.authentication import login_user
     from schemas import LoginRequest
-    from shared.database import get_db
 
     # Convert dict to LoginRequest
     login_request = LoginRequest(**request)
@@ -232,6 +235,24 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"⚠️  Failed to auto-setup org mappers: {e}")
         logger.info("💡 Run manually: python scripts/setup_unified_org_mappers.py")
+
+    # Normalize any legacy local DNS records to the configured public data-plane zone.
+    try:
+        from modules.organization_management import repair_legacy_local_dns_records
+
+        db = SessionLocal()
+        try:
+            repair_counts = repair_legacy_local_dns_records(db)
+        finally:
+            db.close()
+
+        logger.info(
+            "🛠️  DNS normalization complete: organizations=%s org_app_access=%s",
+            repair_counts.get("organizations", 0),
+            repair_counts.get("org_app_access", 0),
+        )
+    except Exception as e:
+        logger.warning(f"⚠️  Failed DNS normalization step: {e}")
 
     logger.info("✅ Tenants Service ready!")
 

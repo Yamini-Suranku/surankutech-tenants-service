@@ -360,6 +360,112 @@ class KeycloakClient:
             logger.error(f"Provider config error: {e}")
             return None
 
+    @staticmethod
+    def get_org_microsoft_idp_alias(org_id: str) -> str:
+        """Stable per-organization Microsoft IdP alias."""
+        return f"microsoft-org-{org_id}"
+
+    async def upsert_org_microsoft_idp(
+        self,
+        org_id: str,
+        client_id: str,
+        client_secret: str,
+        tenant_id: Optional[str] = None
+    ) -> str:
+        """
+        Create/update an organization-scoped Microsoft IdP in Keycloak.
+        Returns the IdP alias.
+        """
+        alias = self.get_org_microsoft_idp_alias(org_id)
+        token = await self.get_admin_token()
+        config = {
+            "clientId": client_id,
+            "clientSecret": client_secret,
+            "syncMode": "IMPORT"
+        }
+
+        # Use tenant-scoped OIDC endpoints when tenant_id is available to avoid
+        # Microsoft /common endpoint issues for single-tenant Azure apps.
+        provider_id = "microsoft"
+        if tenant_id:
+            provider_id = "oidc"
+            config.update(
+                {
+                    "authorizationUrl": f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize",
+                    "tokenUrl": f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+                    "userInfoUrl": "https://graph.microsoft.com/oidc/userinfo",
+                    "logoutUrl": f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/logout",
+                    "defaultScope": "openid profile email",
+                    "issuer": f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+                    "useJwksUrl": "true",
+                    "jwksUrl": f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys",
+                    "validateSignature": "true",
+                }
+            )
+
+        payload = {
+            "alias": alias,
+            "providerId": provider_id,
+            "enabled": True,
+            "updateProfileFirstLoginMode": "on",
+            "trustEmail": True,
+            "storeToken": False,
+            "addReadTokenRoleOnCreate": False,
+            "authenticateByDefault": False,
+            "linkOnly": False,
+            "firstBrokerLoginFlowAlias": "first broker login",
+            "config": config
+        }
+        if tenant_id:
+            payload["config"]["tenant"] = tenant_id
+
+        async with httpx.AsyncClient() as client:
+            existing = await client.get(
+                f"{self.base_url}/admin/realms/{self.realm}/identity-provider/instances/{alias}",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+
+            if existing.status_code == 200:
+                response = await client.put(
+                    f"{self.base_url}/admin/realms/{self.realm}/identity-provider/instances/{alias}",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json=payload
+                )
+                if response.status_code not in (200, 204):
+                    raise Exception(f"Failed to update org Microsoft IdP {alias}: {response.status_code} {response.text}")
+                logger.info(f"Updated org Microsoft IdP alias: {alias}")
+            elif existing.status_code == 404:
+                response = await client.post(
+                    f"{self.base_url}/admin/realms/{self.realm}/identity-provider/instances",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json=payload
+                )
+                if response.status_code not in (201, 204):
+                    raise Exception(f"Failed to create org Microsoft IdP {alias}: {response.status_code} {response.text}")
+                logger.info(f"Created org Microsoft IdP alias: {alias}")
+            else:
+                raise Exception(f"Failed to check org Microsoft IdP {alias}: {existing.status_code} {existing.text}")
+
+        return alias
+
+    async def delete_org_microsoft_idp(self, org_id: str) -> bool:
+        """Delete organization-scoped Microsoft IdP alias if present."""
+        alias = self.get_org_microsoft_idp_alias(org_id)
+        token = await self.get_admin_token()
+
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(
+                f"{self.base_url}/admin/realms/{self.realm}/identity-provider/instances/{alias}",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            if response.status_code in (200, 204, 404):
+                if response.status_code == 404:
+                    logger.info(f"Org Microsoft IdP alias not found (already absent): {alias}")
+                else:
+                    logger.info(f"Deleted org Microsoft IdP alias: {alias}")
+                return True
+            raise Exception(f"Failed to delete org Microsoft IdP {alias}: {response.status_code} {response.text}")
+
     async def build_social_auth_url(
         self,
         provider: str,
@@ -723,6 +829,108 @@ class KeycloakClient:
             import traceback
             logger.error(traceback.format_exc())
             # Don't fail user creation if role assignment fails
+
+    async def _sync_app_roles(
+        self,
+        user_id: str,
+        desired_app_roles: Dict[str, List[str]],
+        managed_apps: List[str],
+        token: str,
+        client: httpx.AsyncClient
+    ):
+        """
+        Reconcile client roles for managed apps:
+        - add missing desired roles
+        - remove stale roles that are no longer desired
+        """
+        try:
+            app_ids = {app for app in (managed_apps or []) if app}
+            app_ids.update((desired_app_roles or {}).keys())
+
+            for app_name in app_ids:
+                client_name = f"{app_name}-client"
+                desired = set(role for role in (desired_app_roles.get(app_name) or []) if role)
+
+                clients_response = await client.get(
+                    f"{self.base_url}/admin/realms/{self.realm}/clients",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"clientId": client_name}
+                )
+                if clients_response.status_code != 200:
+                    logger.error(f"Failed to find client {client_name}: {clients_response.text}")
+                    continue
+
+                clients_list = clients_response.json()
+                if not clients_list:
+                    logger.warning(f"Client {client_name} not found; skipping role sync for app {app_name}")
+                    continue
+
+                app_client_id = clients_list[0]["id"]
+
+                current_resp = await client.get(
+                    f"{self.base_url}/admin/realms/{self.realm}/users/{user_id}/role-mappings/clients/{app_client_id}",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                if current_resp.status_code != 200:
+                    logger.warning(
+                        f"Failed to fetch current client roles for user {user_id}, app {app_name}: {current_resp.text}"
+                    )
+                    continue
+
+                current_roles = current_resp.json() or []
+                current_by_name = {role.get("name"): role for role in current_roles if role.get("name")}
+                current_names = set(current_by_name.keys())
+
+                to_remove_names = current_names - desired
+                to_add_names = desired - current_names
+
+                if to_remove_names:
+                    remove_payload = [current_by_name[name] for name in to_remove_names if name in current_by_name]
+                    if remove_payload:
+                        remove_resp = await client.request(
+                            "DELETE",
+                            f"{self.base_url}/admin/realms/{self.realm}/users/{user_id}/role-mappings/clients/{app_client_id}",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json=remove_payload
+                        )
+                        if remove_resp.status_code not in (204, 200):
+                            logger.warning(
+                                f"Failed to remove stale roles for user {user_id}, app {app_name}: {remove_resp.text}"
+                            )
+
+                if to_add_names:
+                    add_payload = []
+                    for role_name in to_add_names:
+                        role_resp = await client.get(
+                            f"{self.base_url}/admin/realms/{self.realm}/clients/{app_client_id}/roles/{role_name}",
+                            headers={"Authorization": f"Bearer {token}"}
+                        )
+                        if role_resp.status_code == 200:
+                            add_payload.append(role_resp.json())
+                        else:
+                            logger.warning(
+                                f"Role {role_name} not found for client {client_name}: {role_resp.status_code}"
+                            )
+                    if add_payload:
+                        add_resp = await client.post(
+                            f"{self.base_url}/admin/realms/{self.realm}/users/{user_id}/role-mappings/clients/{app_client_id}",
+                            headers={"Authorization": f"Bearer {token}"},
+                            json=add_payload
+                        )
+                        if add_resp.status_code not in (204, 201):
+                            logger.warning(
+                                f"Failed to add desired roles for user {user_id}, app {app_name}: {add_resp.text}"
+                            )
+
+                logger.info(
+                    f"Synced app roles for user {user_id}, app {app_name}. "
+                    f"Desired={sorted(desired)} Current={sorted(current_names)}"
+                )
+
+        except Exception as e:
+            logger.error(f"App role sync error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     async def _assign_realm_roles(
         self,

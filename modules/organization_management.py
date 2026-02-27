@@ -8,6 +8,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 import logging
+import os
 from datetime import datetime
 
 from shared.database import get_db
@@ -72,17 +73,60 @@ APP_CATALOG = {
     }
 }
 
-DEFAULT_DNS_ZONE = "local.suranku"
+DEFAULT_DNS_ZONE = "suranku.net"
+DEFAULT_LOCAL_DNS_ZONE = "local.suranku"
 APP_DEFAULT_PATHS = {
     "darkhole": "/darkhole/login.html",
     "darkfolio": "/darkfolio/",
     "confiploy": "/confiploy/",
 }
 
+
+def _public_dns_zone() -> str:
+    configured = (os.getenv("DATA_PLANE_DOMAIN") or "").strip().lower()
+    if configured:
+        return configured
+    platform_frontend_url = (os.getenv("PLATFORM_FRONTEND_URL") or "").strip().lower()
+    if ".local.suranku" in platform_frontend_url:
+        return _local_dns_zone()
+    return DEFAULT_DNS_ZONE
+
+
+def _local_dns_zone() -> str:
+    return (os.getenv("LOCAL_DATA_PLANE_DOMAIN", DEFAULT_LOCAL_DNS_ZONE) or DEFAULT_LOCAL_DNS_ZONE).strip().lower()
+
+
+def _normalize_dns_zone(dns_zone: Optional[str]) -> str:
+    zone = (dns_zone or "").strip().lower()
+    local_zone = _local_dns_zone()
+    public_zone = _public_dns_zone()
+    if not zone or zone == local_zone:
+        return public_zone
+    return zone
+
+
+def _normalize_dns_hostname(hostname: Optional[str], dns_subdomain: Optional[str], dns_zone: Optional[str]) -> str:
+    local_zone = _local_dns_zone()
+    public_zone = _public_dns_zone()
+    host = (hostname or "").strip().lower()
+    subdomain = (dns_subdomain or "").strip().lower()
+
+    if host.endswith(f".{local_zone}") and public_zone and public_zone != local_zone:
+        prefix = host[: -(len(local_zone) + 1)]
+        return f"{prefix}.{public_zone}" if prefix else f"{subdomain}.{public_zone}"
+
+    if host:
+        return host
+
+    zone = _normalize_dns_zone(dns_zone)
+    return f"{subdomain}.{zone}" if subdomain else host
+
 def _user_has_tenant_admin_access(user_tenant: Optional[UserTenant]) -> bool:
     return user_has_tenant_admin(user_tenant)
 
 def _serialize_org(org: Organization, tenant: Optional[Tenant] = None) -> Dict[str, Any]:
+    normalized_zone = _normalize_dns_zone(org.dns_zone)
+    normalized_hostname = _normalize_dns_hostname(org.dns_hostname, org.dns_subdomain, normalized_zone)
     return {
         "id": org.id,
         "tenant_id": org.tenant_id,
@@ -90,8 +134,8 @@ def _serialize_org(org: Organization, tenant: Optional[Tenant] = None) -> Dict[s
         "slug": org.slug,
         "description": org.description,
         "dns_subdomain": org.dns_subdomain,
-        "dns_zone": org.dns_zone,
-        "dns_hostname": org.dns_hostname,
+        "dns_zone": normalized_zone,
+        "dns_hostname": normalized_hostname,
         "dns_status": org.dns_status,
         "status": org.status,
         "is_default": org.is_default,
@@ -100,10 +144,42 @@ def _serialize_org(org: Organization, tenant: Optional[Tenant] = None) -> Dict[s
     }
 
 def _build_org_hostname(org: Organization) -> str:
-    if org.dns_hostname:
-        return org.dns_hostname
-    zone = org.dns_zone or DEFAULT_DNS_ZONE
-    return f"{org.dns_subdomain}.{zone}"
+    return _normalize_dns_hostname(org.dns_hostname, org.dns_subdomain, org.dns_zone)
+
+
+def repair_legacy_local_dns_records(db: Session) -> Dict[str, int]:
+    """
+    Normalize legacy local DNS records to the public data-plane zone.
+    Safe to run repeatedly on startup.
+    """
+    local_zone = _local_dns_zone()
+    public_zone = _public_dns_zone()
+    if not public_zone or public_zone == local_zone:
+        return {"organizations": 0, "org_app_access": 0}
+
+    org_updates = 0
+    org_app_updates = 0
+
+    organizations = db.query(Organization).all()
+    for org in organizations:
+        target_zone = _normalize_dns_zone(org.dns_zone)
+        target_host = _normalize_dns_hostname(org.dns_hostname, org.dns_subdomain, target_zone)
+        if org.dns_zone != target_zone or org.dns_hostname != target_host:
+            org.dns_zone = target_zone
+            org.dns_hostname = target_host
+            org_updates += 1
+
+    org_access_rows = db.query(OrganizationAppAccess).all()
+    for access in org_access_rows:
+        ingress = (access.ingress_hostname or "").strip().lower()
+        if ingress.endswith(f".{local_zone}"):
+            access.ingress_hostname = ingress[: -(len(local_zone) + 1)] + f".{public_zone}"
+            org_app_updates += 1
+
+    if org_updates or org_app_updates:
+        db.commit()
+
+    return {"organizations": org_updates, "org_app_access": org_app_updates}
 
 def _grant_org_roles(
     db: Session,
@@ -291,7 +367,7 @@ async def create_organization(
             detail="Organization domain is already reserved"
         )
 
-    dns_zone = request.dns_zone or DEFAULT_DNS_ZONE
+    dns_zone = _normalize_dns_zone(request.dns_zone)
     organization = Organization(
         tenant_id=tenant_id,
         name=request.name,
@@ -401,7 +477,7 @@ async def reserve_org_dns(
             detail="Domain is already assigned to another organization"
         )
 
-    dns_zone = request.dns_zone or organization.dns_zone or DEFAULT_DNS_ZONE
+    dns_zone = _normalize_dns_zone(request.dns_zone or organization.dns_zone)
     organization.slug = slug_candidate
     organization.dns_subdomain = slug_candidate
     organization.dns_zone = dns_zone
@@ -645,9 +721,9 @@ async def enable_organization_app(
 
     db.commit()
 
-    org_hostname = organization.dns_hostname if organization else None
+    org_hostname = _build_org_hostname(organization) if organization else None
     org_subdomain = organization.dns_subdomain if organization else None
-    org_zone = organization.dns_zone if organization else None
+    org_zone = _normalize_dns_zone(organization.dns_zone) if organization else None
 
     logger.info(
         "notify_app_enabled payload: tenant=%s app=%s org=%s hostname=%s subdomain=%s zone=%s",

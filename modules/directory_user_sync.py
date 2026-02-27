@@ -5,7 +5,7 @@ Syncs directory users and groups (Azure AD/LDAP) to platform users/groups with r
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, func, select
 from typing import List, Dict, Any, Optional
 import logging
 import uuid
@@ -35,6 +35,48 @@ class DirectoryToPlatformSyncService:
 
     def __init__(self, db: Session):
         self.db = db
+
+    def _find_platform_user_by_email(self, email: str, tenant_id: str) -> Optional[User]:
+        """
+        Resolve case-insensitive email collisions deterministically.
+        Prefer user already in target tenant, then one linked to Keycloak.
+        """
+        normalized = (email or "").strip().lower()
+        if not normalized:
+            return None
+
+        candidates = self.db.query(User).filter(
+            func.lower(User.email) == normalized
+        ).all()
+
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        candidate_ids = [u.id for u in candidates]
+        tenant_members = {
+            ut.user_id
+            for ut in self.db.query(UserTenant).filter(
+                UserTenant.tenant_id == tenant_id,
+                UserTenant.user_id.in_(candidate_ids)
+            ).all()
+        }
+
+        def rank(u: User):
+            return (
+                0 if u.id in tenant_members else 1,
+                0 if u.keycloak_id else 1,
+                u.created_at or datetime.min,
+            )
+
+        candidates.sort(key=rank)
+        winner = candidates[0]
+        logger.warning(
+            "Found %d platform users for email %s; selected user_id=%s",
+            len(candidates), normalized, winner.id
+        )
+        return winner
 
     async def sync_directory_to_platform(
         self,
@@ -185,9 +227,7 @@ class DirectoryToPlatformSyncService:
             return {"action": "skipped", "reason": "No email address"}
 
         # Check if platform user already exists with this email
-        existing_user = self.db.query(User).filter(
-            User.email.ilike(dir_user.email)
-        ).first()
+        existing_user = self._find_platform_user_by_email(dir_user.email, tenant_id)
 
         if existing_user:
             logger.info(f"Platform user already exists for {dir_user.email} (User ID: {existing_user.id})")
@@ -257,8 +297,26 @@ class DirectoryToPlatformSyncService:
         else:
             # Update existing user's roles based on current group memberships
             logger.info(f"Updating existing tenant access roles for user {user.email}")
-            existing_tenant_access.app_roles = calculated_roles
-            logger.info(f"Updated roles for user {user.email}: {calculated_roles}")
+            existing_roles = existing_tenant_access.app_roles or {}
+            merged_roles = dict(existing_roles)
+            managed_apps = {k for k in calculated_roles.keys() if k}
+
+            # Update directory-managed app entries
+            for app_name, roles in calculated_roles.items():
+                merged_roles[app_name] = roles
+
+            # Preserve elevated existing platform role when present
+            existing_platform = set(existing_roles.get("platform", []) or [])
+            new_platform = set(merged_roles.get("platform", []) or [])
+            if "tenant_admin" in existing_platform:
+                new_platform.add("tenant_admin")
+            if new_platform:
+                merged_roles["platform"] = sorted(new_platform)
+
+            existing_tenant_access.app_roles = merged_roles
+            logger.info(
+                f"Updated roles for user {user.email}: calculated={calculated_roles}, merged={merged_roles}, managed_apps={sorted(managed_apps)}"
+            )
 
         # Sync roles to OrganizationUserRole table for organization members UI
         await self._sync_roles_to_organization_user_role_table(
@@ -547,11 +605,12 @@ class DirectoryToPlatformSyncService:
             logger.info(f"Syncing roles to OrganizationUserRole table for user {user.email} in org {organization_id}")
             logger.info(f"DEBUG: app_roles parameter = {app_roles}")
 
-            # Clear existing organization roles for this user
+            # Clear only directory-managed roles; preserve invitation/manual/birthright roles.
             self.db.query(OrganizationUserRole).filter(
                 and_(
                     OrganizationUserRole.user_id == user.id,
-                    OrganizationUserRole.organization_id == organization_id
+                    OrganizationUserRole.organization_id == organization_id,
+                    OrganizationUserRole.granted_via == "directory_sync"
                 )
             ).delete()
 
@@ -665,13 +724,27 @@ async def get_directory_to_platform_status(
         if not org:
             raise HTTPException(status_code=404, detail="Organization not found")
 
-        # Count directory users
-        directory_user_count = db.query(DirectoryUser).filter(
-            and_(
-                DirectoryUser.organization_id == organization_id,
-                DirectoryUser.tenant_id == org.tenant_id
+        # Count unique directory user emails (case-insensitive) for sync status.
+        # This avoids false "pending" counts caused by casing differences.
+        directory_email_subquery = (
+            db.query(func.lower(DirectoryUser.email).label("email"))
+            .filter(
+                and_(
+                    DirectoryUser.organization_id == organization_id,
+                    DirectoryUser.tenant_id == org.tenant_id,
+                    DirectoryUser.email.isnot(None)
+                )
             )
-        ).count()
+            .distinct()
+            .subquery()
+        )
+
+        directory_user_count = (
+            db.query(func.count())
+            .select_from(directory_email_subquery)
+            .scalar()
+            or 0
+        )
 
         # Count directory groups
         directory_group_count = db.query(DirectoryGroup).filter(
@@ -681,21 +754,20 @@ async def get_directory_to_platform_status(
             )
         ).count()
 
-        # Count platform users with email matching directory users
-        directory_emails = db.query(DirectoryUser.email).filter(
-            and_(
-                DirectoryUser.organization_id == organization_id,
-                DirectoryUser.tenant_id == org.tenant_id,
-                DirectoryUser.email.isnot(None)
+        # Count unique platform users in this tenant with case-insensitive email
+        # match against directory users.
+        synced_platform_users = (
+            db.query(func.count(func.distinct(func.lower(User.email))))
+            .join(UserTenant)
+            .filter(
+                and_(
+                    UserTenant.tenant_id == org.tenant_id,
+                    func.lower(User.email).in_(select(directory_email_subquery.c.email))
+                )
             )
-        ).subquery()
-
-        synced_platform_users = db.query(User).join(UserTenant).filter(
-            and_(
-                UserTenant.tenant_id == org.tenant_id,
-                User.email.in_(directory_emails)
-            )
-        ).count()
+            .scalar()
+            or 0
+        )
 
         # Count platform groups with source_type from directory
         synced_platform_groups = db.query(OrganizationGroup).filter(
@@ -705,8 +777,8 @@ async def get_directory_to_platform_status(
             )
         ).count()
 
-        pending_user_sync = directory_user_count - synced_platform_users
-        pending_group_sync = directory_group_count - synced_platform_groups
+        pending_user_sync = max(0, directory_user_count - synced_platform_users)
+        pending_group_sync = max(0, directory_group_count - synced_platform_groups)
 
         return {
             "organization_id": organization_id,

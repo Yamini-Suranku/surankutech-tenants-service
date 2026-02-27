@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 import logging
+import os
 from datetime import datetime, timedelta
 import uuid
 
@@ -39,15 +40,41 @@ def _normalize_hostname(value: Optional[str]) -> Optional[str]:
         host = host[len("http://"):]
     return host.strip().strip("/")
 
+def _to_public_org_hostname(value: Optional[str]) -> Optional[str]:
+    host = _normalize_hostname(value)
+    if not host:
+        return None
+    local_domain = os.getenv("LOCAL_DATA_PLANE_DOMAIN", "local.suranku").strip()
+    public_domain = os.getenv("DATA_PLANE_DOMAIN", "suranku.net").strip()
+    if host.endswith(f".{local_domain}") and public_domain:
+        prefix = host[:-(len(local_domain) + 1)]
+        return f"{prefix}.{public_domain}"
+    return host
+
 def _derive_org_hostname(org: Organization) -> Optional[str]:
     if org.dns_hostname:
-        return org.dns_hostname
+        return _to_public_org_hostname(org.dns_hostname)
     zone = org.dns_zone or DEFAULT_DNS_ZONE
+    local_domain = os.getenv("LOCAL_DATA_PLANE_DOMAIN", "local.suranku").strip()
+    public_domain = os.getenv("DATA_PLANE_DOMAIN", "suranku.net").strip()
+    if zone == local_domain and public_domain:
+        zone = public_domain
     if org.dns_subdomain:
-        return f"{org.dns_subdomain}.{zone}"
+        return _to_public_org_hostname(f"{org.dns_subdomain}.{zone}")
     if org.slug:
-        return f"{org.slug}.{zone}"
+        return _to_public_org_hostname(f"{org.slug}.{zone}")
     return None
+
+def _normalize_invite_app_roles(app_roles: Optional[dict]) -> dict:
+    """Drop apps with empty/invalid role lists and de-duplicate role values."""
+    normalized = {}
+    for app_name, roles in (app_roles or {}).items():
+        if not isinstance(roles, list):
+            continue
+        clean_roles = sorted(set(role for role in roles if isinstance(role, str) and role.strip()))
+        if clean_roles:
+            normalized[app_name] = clean_roles
+    return normalized
 
 def _upsert_org_roles(
     db: Session,
@@ -153,8 +180,8 @@ async def list_tenant_users(
         users.append(UserResponse(
             id=user.id,
             email=user.email,
-            first_name=user.first_name,
-            last_name=user.last_name,
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
             status=ut.status,
             avatar_url=user.avatar_url,
             app_roles=ut.app_roles,
@@ -222,7 +249,7 @@ async def invite_user(
         )
 
     target_org = None
-    org_hostname = _normalize_hostname(request.organization_hostname)
+    org_hostname = _to_public_org_hostname(request.organization_hostname)
     if request.organization_id:
         target_org = db.query(Organization).filter(
             Organization.id == request.organization_id,
@@ -237,8 +264,15 @@ async def invite_user(
         # Host provided without org ID; accept but log
         logger.info("Invitation includes hostname without organization_id: %s", org_hostname)
 
+    invite_app_roles = _normalize_invite_app_roles(request.app_roles)
+    if not invite_app_roles:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one app role must be provided"
+        )
+
     # Validate app roles and check limits
-    for app_name, roles in request.app_roles.items():
+    for app_name, roles in invite_app_roles.items():
         if app_name not in ["darkhole", "darkfolio", "confiploy"]:
             raise HTTPException(status_code=400, detail=f"Invalid app name: {app_name}")
 
@@ -283,7 +317,7 @@ async def invite_user(
                 )
 
         # Update existing pending invitation (resend)
-        existing_invitation.app_roles = request.app_roles
+        existing_invitation.app_roles = invite_app_roles
         existing_invitation.invited_by = current_user.id
         existing_invitation.expires_at = datetime.utcnow() + timedelta(days=7)
         existing_invitation.resent_count = (existing_invitation.resent_count or 0) + 1
@@ -301,7 +335,7 @@ async def invite_user(
             id=str(uuid.uuid4()),
             tenant_id=tenant_id,
             email=request.email,
-            app_roles=request.app_roles,
+            app_roles=invite_app_roles,
             invited_by=current_user.id,
             expires_at=datetime.utcnow() + timedelta(days=7),
             status="pending",
@@ -449,8 +483,8 @@ async def update_user(
         return UserResponse(
             id=user.id,
             email=user.email,
-            first_name=user.first_name,
-            last_name=user.last_name,
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
             status=user_tenant.status,
             avatar_url=user.avatar_url,
             app_roles=user_tenant.app_roles,
@@ -830,7 +864,7 @@ async def resend_invitation(
             invitation.organization_hostname = _derive_org_hostname(target_org)
 
         if request and request.organization_hostname:
-            normalized_host = _normalize_hostname(request.organization_hostname)
+            normalized_host = _to_public_org_hostname(request.organization_hostname)
             if normalized_host:
                 invitation.organization_hostname = normalized_host
 
@@ -932,6 +966,14 @@ async def bulk_invite_users(
     try:
         for invite_request in request.invitations:
             try:
+                invite_app_roles = _normalize_invite_app_roles(invite_request.app_roles)
+                if not invite_app_roles:
+                    results["failed"].append({
+                        "email": invite_request.email,
+                        "reason": "At least one app role must be provided"
+                    })
+                    continue
+
                 # Check if email already invited or exists
                 existing_invitation = db.query(Invitation).filter(
                     Invitation.tenant_id == tenant_id,
@@ -962,13 +1004,11 @@ async def bulk_invite_users(
                         continue
 
                 # Validate app roles and check limits
-                for app_name, roles in invite_request.app_roles.items():
+                validation_error = None
+                for app_name, roles in invite_app_roles.items():
                     if app_name not in ["darkhole", "darkfolio", "confiploy"]:
-                        results["failed"].append({
-                            "email": invite_request.email,
-                            "reason": f"Invalid app name: {app_name}"
-                        })
-                        continue
+                        validation_error = f"Invalid app name: {app_name}"
+                        break
 
                     app_access = db.query(TenantAppAccess).filter(
                         TenantAppAccess.tenant_id == tenant_id,
@@ -976,18 +1016,22 @@ async def bulk_invite_users(
                     ).first()
 
                     if not app_access or app_access.current_users >= app_access.user_limit:
-                        results["failed"].append({
-                            "email": invite_request.email,
-                            "reason": f"User limit exceeded for {app_name} app"
-                        })
-                        continue
+                        validation_error = f"User limit exceeded for {app_name} app"
+                        break
+
+                if validation_error:
+                    results["failed"].append({
+                        "email": invite_request.email,
+                        "reason": validation_error
+                    })
+                    continue
 
                 # Create invitation
                 invitation = Invitation(
                     id=str(uuid.uuid4()),
                     tenant_id=tenant_id,
                     email=invite_request.email,
-                    app_roles=invite_request.app_roles,
+                    app_roles=invite_app_roles,
                     invited_by=current_user.id,
                     expires_at=datetime.utcnow() + timedelta(days=7),
                     status="pending"
@@ -1124,6 +1168,7 @@ async def get_invitation_info(
         from shared.models import Tenant
         tenant = db.query(Tenant).filter(Tenant.id == invitation.tenant_id).first()
         inviter = db.query(User).filter(User.id == invitation.invited_by).first()
+        existing_user = db.query(User).filter(User.email == invitation.email).first()
 
         return {
             "status": "valid",
@@ -1136,6 +1181,8 @@ async def get_invitation_info(
             "message": "Invitation is valid and ready to accept",
             "organization_hostname": invitation.organization_hostname,
             "login_url": _build_login_url(invitation),
+            "existing_user": existing_user is not None,
+            "requires_registration": existing_user is None,
         }
 
     except HTTPException:
@@ -1251,12 +1298,18 @@ async def accept_invitation(
                     "message": "Successfully joined organization! You can now login.",
                     "user_id": existing_user.id,
                     "tenant_id": invitation.tenant_id,
-                    "redirect_url": "/login"
+                    "redirect_url": _build_login_url(invitation)
                 }
 
         # User doesn't exist - create new user account
         from modules.keycloak_client import KeycloakClient
         import uuid
+
+        if not request.first_name or not request.last_name or not request.password:
+            raise HTTPException(
+                status_code=400,
+                detail="First name, last name, and password are required for new users"
+            )
 
         # Create user in database (no password stored here)
         from shared.models import UserStatus
@@ -1340,7 +1393,7 @@ async def accept_invitation(
             "message": "Account created successfully! You can now login with your credentials.",
             "user_id": new_user.id,
             "tenant_id": invitation.tenant_id,
-            "redirect_url": "/login"
+            "redirect_url": _build_login_url(invitation)
         }
 
     except HTTPException:

@@ -4,6 +4,7 @@ Handles sending invitation emails to new users
 """
 
 import logging
+import os
 from typing import Dict
 from sqlalchemy.orm import Session
 from shared.models import User, Tenant
@@ -153,13 +154,33 @@ class InvitationEmailService(BaseEmailService):
         invitation = kwargs['invitation']
         config = self._get_smtp_config()
         if invitation.organization_hostname:
-            host = invitation.organization_hostname.strip()
+            host = self._to_public_org_hostname(invitation.organization_hostname)
             if host.startswith("http://") or host.startswith("https://"):
                 base = host.rstrip("/")
             else:
                 base = f"https://{host}".rstrip("/")
             return f"{base}/darkhole/pages/accept-invitation.html?invitation_id={invitation.id}"
         return f"{config['app_base_url']}/vanilla/pages/accept-invitation.html?invitation_id={invitation.id}"
+
+    def _to_public_org_hostname(self, hostname: str) -> str:
+        """
+        Convert local data-plane hostnames to public hostnames for invitation links.
+        Example: acme.local.suranku -> acme.suranku.net
+        """
+        host = (hostname or "").strip().rstrip("/")
+        if host.startswith("https://"):
+            host = host[len("https://"):]
+        elif host.startswith("http://"):
+            host = host[len("http://"):]
+
+        local_domain = os.getenv("LOCAL_DATA_PLANE_DOMAIN", "local.suranku").strip()
+        public_domain = os.getenv("DATA_PLANE_DOMAIN", "suranku.net").strip()
+
+        if host.endswith(f".{local_domain}") and public_domain:
+            prefix = host[:-(len(local_domain) + 1)]
+            return f"{prefix}.{public_domain}"
+
+        return host
 
     def _format_app_roles(self, app_roles: dict) -> str:
         """

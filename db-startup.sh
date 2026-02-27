@@ -54,8 +54,40 @@ wait_for_vault_secrets() {
     return 1
 }
 
+wait_for_vault_smtp() {
+    if [[ -n "$SMTP_USER" && -n "$SMTP_PASSWORD" && -z "${VAULT_SMTP_SECRET_FILE_PATH:-}" ]]; then
+        echo "⚙️ Using SMTP credentials from environment; skipping Vault SMTP secret wait."
+        return 0
+    fi
+
+    if [[ -z "${VAULT_SMTP_SECRET_FILE_PATH:-}" ]]; then
+        echo "ℹ️ VAULT_SMTP_SECRET_FILE_PATH not set; skipping Vault SMTP secret load."
+        return 0
+    fi
+
+    echo "⏳ Waiting for Vault SMTP secret to be available..."
+    local max_attempts=30
+    local attempt=0
+
+    while [ $attempt -lt $max_attempts ]; do
+        if [ -f "$VAULT_SMTP_SECRET_FILE_PATH" ]; then
+            echo "📂 Loading SMTP credentials from Vault..."
+            source "$VAULT_SMTP_SECRET_FILE_PATH"
+            echo "✅ Vault SMTP secret loaded!"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        echo "   Attempt $attempt/$max_attempts: Vault SMTP secret not ready yet..."
+        sleep 2
+    done
+
+    echo "⚠️ Vault SMTP secret not found after $max_attempts attempts, using environment variables..."
+    return 1
+}
+
 # Wait for and source Vault-injected secrets (do not fail startup if Vault isn't ready)
 wait_for_vault_secrets || true
+wait_for_vault_smtp || true
 
 # Function to wait for database
 wait_for_db() {

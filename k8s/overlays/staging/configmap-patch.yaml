@@ -5,6 +5,8 @@ metadata:
 data:
   environment: "staging"
   keycloak-url: "https://staging.id.suranku.com"
+  keycloak-public-url: "https://staging.id.suranku.com"
+  platform-frontend-url: "https://platform.staging.suranku.net"
   # Staging-specific Application Base URL for email links (AWS format)
   app-base-url: "https://staging.tenants.suranku.com"
   # Cloud Storage Configuration for staging (AWS S3)

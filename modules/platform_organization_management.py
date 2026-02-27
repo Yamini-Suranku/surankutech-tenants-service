@@ -61,7 +61,7 @@ APP_CATALOG = {
     }
 }
 
-DEFAULT_DNS_ZONE = "local.suranku"
+DEFAULT_DNS_ZONE = "suranku.net"
 
 def _get_or_create_user_tenant(db: Session, user: User, tenant_name: str = None) -> Tenant:
     """Get user's existing tenant or create new one for their company/workspace"""

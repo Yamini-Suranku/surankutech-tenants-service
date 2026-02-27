@@ -6,8 +6,11 @@ data:
   # Base configuration - override in environment-specific overlays
   environment: "development"
   keycloak-url: "http://keycloak.shared-services.svc.cluster.local:8080"
+  keycloak-public-url: "https://keycloak.local.suranku"
+  platform-frontend-url: "https://platform.local.suranku"
   app-base-url: "http://localhost:8000"  # Default fallback
   frontend-url: "http://home.local.suranku"
+  cors-allow-origins: "https://home.local.suranku,https://id.local.suranku,https://api.local.suranku"
   # Storage Configuration
   storage-type: "s3"
   storage-endpoint: ""

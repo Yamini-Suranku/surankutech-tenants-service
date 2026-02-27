@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 # Create router for authentication endpoints
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
+
+def _safe_name(value: str | None, fallback: str = "") -> str:
+    if value is None:
+        return fallback
+    return value
+
 class UserRegisterRequest(BaseModel):
     email: str
     password: str
@@ -153,8 +159,8 @@ async def login_user(
             user_response = UserResponse(
                 id=user.id,
                 email=user.email,
-                first_name=user.first_name,
-                last_name=user.last_name,
+                first_name=_safe_name(user.first_name),
+                last_name=_safe_name(user.last_name),
                 status=user.status,
                 app_roles={},  # No app roles yet
                 joined_at=None,
@@ -224,8 +230,8 @@ async def login_user(
         user_response = UserResponse(
             id=user.id,
             email=user.email,
-            first_name=user.first_name,
-            last_name=user.last_name,
+            first_name=_safe_name(user.first_name),
+            last_name=_safe_name(user.last_name),
             status=user.status,
             app_roles=current_user_tenant.app_roles,
             joined_at=current_user_tenant.joined_at,
@@ -275,8 +281,8 @@ async def get_current_user(
             user_response = UserResponse(
                 id=user.id,
                 email=user.email,
-                first_name=user.first_name,
-                last_name=user.last_name,
+                first_name=_safe_name(user.first_name),
+                last_name=_safe_name(user.last_name),
                 status=user.status,
                 app_roles={},  # No app roles yet
                 joined_at=None,
@@ -326,8 +332,8 @@ async def get_current_user(
         user_response = UserResponse(
             id=user.id,
             email=user.email,
-            first_name=user.first_name,
-            last_name=user.last_name,
+            first_name=_safe_name(user.first_name),
+            last_name=_safe_name(user.last_name),
             status=user.status,
             app_roles=current_user_tenant.app_roles,
             joined_at=current_user_tenant.joined_at,

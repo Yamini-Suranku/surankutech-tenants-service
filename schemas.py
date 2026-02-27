@@ -96,7 +96,7 @@ class OrganizationCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=255)
     desired_subdomain: Optional[str] = Field(None, min_length=3, max_length=63, description="Optional custom subdomain")
     description: Optional[str] = Field(None, max_length=1000)
-    dns_zone: Optional[str] = Field(None, max_length=255, description="DNS zone or domain suffix (e.g., local.suranku)")
+    dns_zone: Optional[str] = Field(None, max_length=255, description="DNS zone or domain suffix (e.g., suranku.net)")
     enabled_apps: Optional[List[str]] = Field(default=["darkhole"], description="List of apps to enable for this organization")
 
 class OrganizationDNSRequest(BaseModel):
@@ -213,9 +213,9 @@ class InvitationResponse(BaseModel):
 
 class InvitationAcceptRequest(BaseModel):
     invitation_token: str = Field("", description="Legacy field, not required")
-    password: str = Field(..., min_length=8, max_length=128)
-    first_name: str = Field(..., min_length=1, max_length=50)
-    last_name: str = Field(..., min_length=1, max_length=50)
+    password: Optional[str] = Field(None, min_length=8, max_length=128)
+    first_name: Optional[str] = Field(None, min_length=1, max_length=50)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=50)
 
 class InvitationResendRequest(BaseModel):
     message: Optional[str] = Field(None, max_length=500)

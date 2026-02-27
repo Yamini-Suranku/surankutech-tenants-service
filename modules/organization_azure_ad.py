@@ -292,6 +292,17 @@ async def create_azure_ad_config(
 
         # Store client secret securely
         await _store_client_secret(org, config.client_secret)
+        # Keep Keycloak Microsoft IdP org-scoped and in sync with this org's Entra config.
+        try:
+            keycloak_client = KeycloakClient()
+            await keycloak_client.upsert_org_microsoft_idp(
+                org_id=org.id,
+                client_id=config.client_id,
+                client_secret=config.client_secret or "",
+                tenant_id=config.tenant_id
+            )
+        except Exception as idp_error:
+            logger.warning(f"Failed to upsert org-scoped Microsoft IdP for org {org.id}: {idp_error}")
 
         db.commit()
 
@@ -423,14 +434,29 @@ async def update_azure_ad_config(
 
         if config_update.client_secret:
             await _store_client_secret(org, config_update.client_secret)
+            client_secret_for_idp = config_update.client_secret
         else:
             existing_secret = await _get_client_secret(org)
+            client_secret_for_idp = existing_secret
             if not existing_secret:
                 # For group role mapping updates, we don't require the client secret
                 # since we're not making API calls to Azure AD, just updating local mappings
                 logger.warning(f"No client secret found for organization {organization_id}, but allowing group role mapping update")
                 # Only fail if we need the secret for actual Azure AD operations (sync operations)
                 # For configuration updates (especially group role mappings), we can proceed without it
+
+        # Sync org-scoped Microsoft IdP if we have credentials.
+        if client_secret_for_idp:
+            try:
+                keycloak_client = KeycloakClient()
+                await keycloak_client.upsert_org_microsoft_idp(
+                    org_id=org.id,
+                    client_id=config_update.client_id,
+                    client_secret=client_secret_for_idp,
+                    tenant_id=config_update.tenant_id
+                )
+            except Exception as idp_error:
+                logger.warning(f"Failed to upsert org-scoped Microsoft IdP for org {org.id}: {idp_error}")
 
         db.commit()
 
@@ -1182,6 +1208,11 @@ async def delete_azure_ad_config(
 
         db.delete(config)
         await _delete_client_secret(org)
+        try:
+            keycloak_client = KeycloakClient()
+            await keycloak_client.delete_org_microsoft_idp(org.id)
+        except Exception as idp_error:
+            logger.warning(f"Failed to delete org-scoped Microsoft IdP for org {org.id}: {idp_error}")
         db.commit()
 
         return {"message": "Azure AD configuration deleted successfully"}
@@ -1348,18 +1379,30 @@ async def _sync_to_keycloak(
                             results["errors"].append(f"Failed to create user {email}: {str(e)}")
                             continue
 
-                # Assign app roles if any
-                if app_roles:
-                    try:
-                        token = await keycloak_client.get_admin_token()
-                        async with httpx.AsyncClient() as role_client:
-                            await keycloak_client._assign_app_roles(user_id, app_roles, token, role_client)
+                # Reconcile app roles (add new + remove stale) for managed apps
+                try:
+                    token = await keycloak_client.get_admin_token()
+                    async with httpx.AsyncClient() as role_client:
+                        managed_apps = set()
+                        for mapping in (group_role_mappings or {}).values():
+                            if isinstance(mapping, dict):
+                                managed_apps.update(mapping.keys())
+                        # Keep known org-scoped apps under reconciliation to avoid stale role drift.
+                        managed_apps.update({"darkhole", "darkfolio", "confiploy"})
 
-                        results["roles_assigned"] += len([role for roles in app_roles.values() for role in roles])
-                        logger.info(f"Assigned roles to {email}: {app_roles}")
+                        await keycloak_client._sync_app_roles(
+                            user_id=user_id,
+                            desired_app_roles=app_roles,
+                            managed_apps=list(managed_apps),
+                            token=token,
+                            client=role_client
+                        )
 
-                    except Exception as e:
-                        results["errors"].append(f"Failed to assign roles to {email}: {str(e)}")
+                    results["roles_assigned"] += len([role for roles in app_roles.values() for role in roles])
+                    logger.info(f"Synced roles for {email}: {app_roles}")
+
+                except Exception as e:
+                    results["errors"].append(f"Failed to sync roles for {email}: {str(e)}")
 
                 results["users_synced"] += 1
 

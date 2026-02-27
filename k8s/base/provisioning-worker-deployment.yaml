@@ -123,6 +123,8 @@ spec:
         # DNS configuration for domain provisioning
         - name: LOCAL_DATA_PLANE_DOMAIN
           value: "local.suranku"
+        - name: DATA_PLANE_DOMAIN
+          value: "suranku.net"
         # Cert-manager configuration
         - name: CERT_MANAGER_CLUSTER_ISSUER
           value: "local-ca"
