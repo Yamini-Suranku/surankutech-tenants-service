@@ -97,3 +97,14 @@ The repository includes GitHub Actions workflows for:
 - Minimal base image (python:3.11-slim)
 - Security contexts in Kubernetes
 - Secrets management via Kubernetes secrets
+
+## Repository hygiene
+
+- Local runtime/cache and sensitive artifacts are ignored via `.gitignore` (for example: `__pycache__/`, virtualenv folders, `.env*`, key/certificate files).
+- Do not commit credentials, tokens, or secret material.
+- Before opening a PR, verify only intended files are staged:
+
+```bash
+git status --short
+```
+
