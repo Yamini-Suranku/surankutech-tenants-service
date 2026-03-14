@@ -41,3 +41,101 @@ build/
 *.swp
 *.swo
 .DS_Store
+
+# BEGIN: AI_AGENT_BASELINE
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Node / Frontend
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+dist/
+build/
+.next/
+.cache/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs / temp
+*.log
+logs/
+tmp/
+*.tmp
+
+# Secrets / local env
+.env
+.env.*
+*.pem
+*.key
+*.crt
+secrets/
+
+# Data/artifacts
+*.sqlite
+*.db
+*.parquet
+*.csv
+artifacts/
+mlruns/
+
+# Containers / infra local
+.kube/
+# END: AI_AGENT_BASELINE
+
+# BEGIN: LOCAL_SENSITIVE_ARTIFACTS
+# Local secret/token material
+.envrc
+*.local
+*.local.*
+*.secret
+*.secret.*
+*.secrets
+*.secrets.*
+*token*.local
+*token*.txt
+*token*.json
+*token*.yaml
+*token*.yml
+*secret*.local
+*secret*.txt
+*secret*.json
+*secret*.yaml
+*secret*.yml
+*credential*.local
+*credential*.json
+*credential*.yaml
+*credential*.yml
+*pat*
+.vault-token
+vault-token
+vault-init.txt
+root_token.local
+root_token.txt
+*.kubeconfig
+kubeconfig
+
+# Local infra overrides
+terraform.tfvars
+terraform.tfvars.json
+.terraform/
+# END: LOCAL_SENSITIVE_ARTIFACTS
