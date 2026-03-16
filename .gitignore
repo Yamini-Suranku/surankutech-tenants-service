@@ -139,3 +139,6 @@ terraform.tfvars
 terraform.tfvars.json
 .terraform/
 # END: LOCAL_SENSITIVE_ARTIFACTS
+
+# Local Codex instructions
+AGENTS.md
