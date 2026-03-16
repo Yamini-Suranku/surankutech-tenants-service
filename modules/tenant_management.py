@@ -6,6 +6,7 @@ Handles tenant creation, retrieval, and app access management
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import logging
 from datetime import datetime, timedelta
 import uuid
@@ -307,7 +308,9 @@ def get_or_create_user_from_token(db: Session, token_data: TokenData) -> User:
 
     user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
     if not user and token_data.email:
-        user = db.query(User).filter(User.email == token_data.email).first()
+        user = db.query(User).filter(
+            func.lower(User.email) == token_data.email.strip().lower()
+        ).first()
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found in tenant service")
@@ -418,6 +421,7 @@ async def create_tenant(
     """Create new tenant during signup - supports existing users"""
     try:
         keycloak_client = KeycloakClient()
+        normalized_admin_email = (request.admin_email or "").strip().lower()
 
         # Create tenant
         tenant_id = str(uuid.uuid4())
@@ -435,16 +439,16 @@ async def create_tenant(
         db.flush()  # Ensure tenant is written to DB before creating dependent records
 
         # Check if admin user already exists
-        existing_user = db.query(User).filter(User.email == request.admin_email).first()
+        existing_user = db.query(User).filter(func.lower(User.email) == normalized_admin_email).first()
 
         if existing_user:
             # User exists - add to new tenant
-            logger.info(f"Adding existing user {request.admin_email} to new tenant {tenant_id}")
+            logger.info(f"Adding existing user {normalized_admin_email} to new tenant {tenant_id}")
             user = existing_user
 
             # Add existing user to new tenant group in Keycloak
             keycloak_user_id = await keycloak_client.add_existing_user_to_tenant(
-                user_email=request.admin_email,
+                user_email=normalized_admin_email,
                 tenant_id=tenant_id,
                 app_roles={
                     "darkhole": ["admin"],
@@ -459,11 +463,11 @@ async def create_tenant(
 
         else:
             # New user - create invitation instead of requiring password
-            logger.info(f"Creating invitation for new admin user {request.admin_email} for tenant {tenant_id}")
+            logger.info(f"Creating invitation for new admin user {normalized_admin_email} for tenant {tenant_id}")
 
             # Create user record with PENDING status
             user = User(
-                email=request.admin_email,
+                email=normalized_admin_email,
                 first_name=request.admin_first_name or request.company_name,
                 last_name=request.admin_last_name or "Admin",
                 status="pending",  # Will be activated when invitation is accepted
@@ -477,7 +481,7 @@ async def create_tenant(
             invitation_token = str(uuid.uuid4())
             invitation = Invitation(
                 tenant_id=tenant_id,
-                email=request.admin_email,
+                email=normalized_admin_email,
                 app_roles={
                     "darkhole": ["admin"],
                     "darkfolio": ["admin"],
@@ -491,7 +495,7 @@ async def create_tenant(
             db.flush()
 
             # TODO: Send invitation email with setup link
-            logger.info(f"Invitation created for {request.admin_email} with token {invitation_token}")
+            logger.info(f"Invitation created for {normalized_admin_email} with token {invitation_token}")
 
             # Note: Keycloak user will be created when invitation is accepted
 

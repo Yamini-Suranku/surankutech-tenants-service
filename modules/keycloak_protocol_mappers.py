@@ -18,6 +18,12 @@ class ClientConfig:
 
 CLIENTS: List[ClientConfig] = [
     ClientConfig(
+        client_id="platform-frontend",
+        app_name="platform",
+        display_name="Platform Frontend",
+        create_if_missing=False,
+    ),
+    ClientConfig(
         client_id="darkhole-client",
         app_name="darkhole",
         display_name="DarkHole",

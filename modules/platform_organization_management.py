@@ -49,7 +49,7 @@ APP_CATALOG = {
         "version": "v1.8.2",
         "category": "Analytics",
         "icon": "📊",
-        "default_roles": ["admin", "user", "viewer"]
+        "default_roles": ["admin", "user", "model_engineer", "evaluator", "stuart"]
     },
     "confiploy": {
         "name": "ConfiPloy",

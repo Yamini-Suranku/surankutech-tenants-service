@@ -34,6 +34,7 @@ class UserAttributeSyncService:
 
             # Extract individual claims
             org_memberships = enhanced_data.get("org_memberships", [])
+            token_org_memberships = self._build_token_org_memberships(org_memberships)
             tenant_id = enhanced_data.get("tenant_id")
             all_tenants = enhanced_data.get("all_tenants", [])
             app_roles = enhanced_data.get("app_roles", {})
@@ -50,7 +51,7 @@ class UserAttributeSyncService:
             attributes = user_data.get("attributes", {})
 
             # Sync org_memberships
-            attributes["org_memberships"] = [json.dumps(org_memberships, separators=(',', ':'))]
+            attributes["org_memberships"] = [json.dumps(token_org_memberships, separators=(',', ':'))]
 
             # Sync tenant claims
             if tenant_id:
@@ -70,16 +71,24 @@ class UserAttributeSyncService:
             if current_org:
                 attributes["current_org"] = [current_org]
 
-            # Bulk update user attributes in Keycloak
+            # Bulk update user attributes in Keycloak.
+            # Some legacy users can fail full attribute updates in Keycloak with 400.
+            # In that case, fall back to per-attribute updates so critical claims still land.
             update_data = {"attributes": attributes}
             success = await self.keycloak_client.update_user(user_keycloak_id, update_data)
+            if not success:
+                logger.warning(
+                    "Bulk attribute sync failed for user %s; attempting per-attribute fallback",
+                    user_keycloak_id,
+                )
+                success = await self._sync_user_attributes_individually(user_keycloak_id, attributes)
 
             if success:
                 logger.info(f"Successfully synced enhanced token data for user {user_keycloak_id}")
                 logger.info(f"  - Tenant ID: {tenant_id}")
                 logger.info(f"  - All tenants: {all_tenants}")
                 logger.info(f"  - App roles: {list(app_roles.keys())}")
-                logger.info(f"  - Org memberships: {len(org_memberships)}")
+                logger.info(f"  - Org memberships: {len(token_org_memberships)}")
                 if current_org:
                     logger.info(f"  - Current org: {current_org}")
                 return True
@@ -121,6 +130,46 @@ class UserAttributeSyncService:
             logger.error(f"Error updating user attribute {attribute_name} for {user_keycloak_id}: {e}")
             return False
 
+    async def _sync_user_attributes_individually(
+        self,
+        user_keycloak_id: str,
+        attributes: Dict[str, List[str]],
+    ) -> bool:
+        """
+        Fallback synchronization path for Keycloak users that reject bulk attribute updates.
+        Returns True when critical org claims are applied.
+        """
+        # Apply critical claims first so downstream org authorization can succeed.
+        ordered_keys = [
+            "org_memberships",
+            "current_org",
+            "app_roles",
+            "org_app_roles",
+            "tenant_id",
+            "active_tenant",
+            "all_tenants",
+        ]
+
+        applied = set()
+        for key in ordered_keys:
+            values = attributes.get(key)
+            if not values:
+                continue
+            value = values[0]
+            ok = await self._update_user_attribute(user_keycloak_id, key, value)
+            if ok:
+                applied.add(key)
+            else:
+                logger.warning(
+                    "Per-attribute sync failed for user %s attribute %s",
+                    user_keycloak_id,
+                    key,
+                )
+
+        # Treat as success if core org claims are present.
+        critical = {"org_memberships", "current_org", "app_roles"}
+        return critical.issubset(applied)
+
     @staticmethod
     def _build_org_app_roles(org_memberships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Build org_app_roles claim from org memberships."""
@@ -137,6 +186,26 @@ class UserAttributeSyncService:
                     "roles": roles or []
                 })
         return org_app_roles
+
+    @staticmethod
+    def _build_token_org_memberships(org_memberships: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Build compact org_memberships payload for JWT attribute storage.
+        Keep only fields needed for org resolution to avoid Keycloak attribute size issues.
+        """
+        compact = []
+        for membership in org_memberships or []:
+            org_slug = membership.get("org_slug") or membership.get("dns_subdomain")
+            if not org_slug:
+                continue
+            compact.append(
+                {
+                    "tenant_id": membership.get("tenant_id"),
+                    "org_id": membership.get("org_id"),
+                    "org_slug": org_slug,
+                }
+            )
+        return compact
 
     @staticmethod
     def _derive_current_org_slug(org_memberships: List[Dict[str, Any]]) -> Optional[str]:

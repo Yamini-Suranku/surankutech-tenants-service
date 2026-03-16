@@ -9,7 +9,7 @@ from typing import Dict
 from sqlalchemy.orm import Session
 from shared.models import User, Tenant
 from shared.email_service import BaseEmailService
-from models import Invitation
+from models import Invitation, Organization
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +40,24 @@ class InvitationEmailService(BaseEmailService):
             Dict with status and message
         """
         # Build email content
+        display_org_name = self._resolve_display_org_name(
+            db=db,
+            invitation=invitation,
+            tenant=tenant,
+        )
+
         subject, html_body = self._build_email_content(
             invitation=invitation,
             invited_by_user=invited_by_user,
-            tenant=tenant
+            tenant=tenant,
+            display_org_name=display_org_name,
         )
 
         # Prepare development mode info
         development_info = {
             "Invitation sent to": invitation.email,
             "Invited by": f"{invited_by_user.first_name} {invited_by_user.last_name}",
-            "Organization": tenant.name,
+            "Organization": display_org_name,
             "App roles": str(invitation.app_roles),
             "Invitation expires": invitation.expires_at.isoformat() if invitation.expires_at else "No expiry",
             "Invitation URL": self._build_action_url(invitation=invitation)
@@ -72,6 +79,18 @@ class InvitationEmailService(BaseEmailService):
             }
         )
 
+    def _resolve_display_org_name(self, db: Session, invitation: Invitation, tenant: Tenant) -> str:
+        """Prefer organization name for org-scoped invites; fallback to tenant name."""
+        if invitation.organization_id:
+            org = db.query(Organization).filter(
+                Organization.id == invitation.organization_id,
+                Organization.tenant_id == invitation.tenant_id,
+                Organization.deleted_at.is_(None)
+            ).first()
+            if org and org.name:
+                return org.name
+        return tenant.name
+
     def _build_email_content(self, **kwargs) -> tuple[str, str]:
         """
         Build invitation email subject and HTML content
@@ -81,7 +100,7 @@ class InvitationEmailService(BaseEmailService):
         """
         invitation = kwargs['invitation']
         invited_by_user = kwargs['invited_by_user']
-        tenant = kwargs['tenant']
+        display_org_name = kwargs.get('display_org_name') or kwargs['tenant'].name
 
         # Build invitation acceptance URL
         invitation_url = self._build_action_url(invitation=invitation)
@@ -90,19 +109,19 @@ class InvitationEmailService(BaseEmailService):
         app_names = self._format_app_roles(invitation.app_roles)
 
         # Email content
-        subject = f"You're invited to join {tenant.name} on Suranku Platform"
+        subject = f"You're invited to join {display_org_name} on Suranku Platform"
 
         html_body = f"""
         <html>
         <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
             <div style="text-align: center; margin-bottom: 30px;">
                 <h1 style="color: #333; margin-bottom: 10px;">You're Invited!</h1>
-                <p style="color: #666; font-size: 16px;">{invited_by_user.first_name} {invited_by_user.last_name} has invited you to join {tenant.name}</p>
+                <p style="color: #666; font-size: 16px;">{invited_by_user.first_name} {invited_by_user.last_name} has invited you to join {display_org_name}</p>
             </div>
 
             <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
                 <p>Hi there,</p>
-                <p>You've been invited to join <strong>{tenant.name}</strong> on the Suranku Platform by {invited_by_user.first_name} {invited_by_user.last_name}.</p>
+                <p>You've been invited to join <strong>{display_org_name}</strong> on the Suranku Platform by {invited_by_user.first_name} {invited_by_user.last_name}.</p>
 
                 <div style="margin: 15px 0;">
                     <strong>Your access includes:</strong>

@@ -31,6 +31,7 @@ from modules.organization_azure_ad import router as org_azure_ad_router
 from modules.organization_groups import router as org_groups_router
 from modules.directory_user_sync import router as directory_sync_router
 from modules.token_enhancement_api import router as token_enhancement_router
+from modules.audit_events import router as audit_events_router
 
 # Import organization resolver routes for DNS-based org resolution
 from org_resolver_routes import router as org_resolver_router
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Tenants Service",
     description="Multi-tenant user and organization management service",
-    version="2.0.0",
+    version="2.0.1",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -91,9 +92,17 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "tenants",
-        "version": "2.0.0",
+        "version": "2.0.1",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+KEYCLOAK_ORG_MAPPER_CLIENTS = [
+    "platform-frontend",
+    "darkhole-client",
+    "darkfolio-client",
+    "confiploy-client",
+]
+
 
 @app.post("/api/admin/setup-org-mappers")
 async def setup_org_mappers_endpoint():
@@ -105,28 +114,29 @@ async def setup_org_mappers_endpoint():
         from modules.keycloak_client import KeycloakClient
 
         keycloak_client = KeycloakClient()
-        mappers = await keycloak_client.ensure_client_org_mappers("darkhole-client")
+        configured = {}
+        for client_id in KEYCLOAK_ORG_MAPPER_CLIENTS:
+            configured[client_id] = await keycloak_client.ensure_client_org_mappers(client_id)
 
-        if mappers:
+        configured_count = sum(1 for m in configured.values() if m)
+        if configured_count:
             return {
                 "status": "success",
-                "message": f"Organization-scoped mappers configured successfully",
-                "mappers_configured": list(mappers.keys()),
-                "client_id": "darkhole-client"
+                "message": "Organization-scoped mappers configured successfully",
+                "clients": configured,
             }
         else:
             return {
                 "status": "warning",
                 "message": "No mappers were created (they may already exist)",
-                "mappers_configured": [],
-                "client_id": "darkhole-client"
+                "clients": configured,
             }
 
     except Exception as e:
         return {
             "status": "error",
             "message": f"Failed to setup organization mappers: {str(e)}",
-            "suggestion": "Check Keycloak connectivity and darkhole-client exists"
+                "suggestion": "Check Keycloak connectivity and configured clients exist"
         }
 
 # Include all module routers
@@ -149,6 +159,7 @@ app.include_router(org_azure_ad_router)     # /api/platform/organizations/{id}/a
 app.include_router(org_groups_router)       # /api/platform/organizations/{id}/groups/* (manual groups management)
 app.include_router(directory_sync_router)   # /api/platform/organizations/{id}/sync-directory-to-platform (directory to platform sync)
 app.include_router(token_enhancement_router) # /api/token-enhancement/* (JWT token enhancement for Keycloak)
+app.include_router(audit_events_router)      # /api/audit/* (centralized audit ingestion)
 app.include_router(org_resolver_router)       # /api/organizations/* (org resolution for DNS routing)
 
 # Legacy auth endpoint support for backward compatibility
@@ -173,7 +184,7 @@ async def service_info():
     """Service information and module status"""
     return {
         "service": "tenants",
-        "version": "2.0.0",
+        "version": "2.0.1",
         "modules": {
             "tenant_management": "✅ Active",
             "authentication": "✅ Active",
@@ -211,7 +222,7 @@ async def service_info():
 @app.on_event("startup")
 async def startup_event():
     """Application startup tasks"""
-    logger.info("🚀 Tenants Service v2.0.0 starting up...")
+    logger.info("🚀 Tenants Service v2.0.1 starting up...")
     logger.info("📦 Modules loaded: tenant_management, organization_management, authentication, email_verification, user_management, social_auth, file_upload, ldap_management")
     logger.info("🔗 Keycloak integration enabled")
     logger.info("📧 Email verification enabled")
@@ -225,12 +236,21 @@ async def startup_event():
         from modules.keycloak_client import KeycloakClient
 
         keycloak_client = KeycloakClient()
-        mappers = await keycloak_client.ensure_client_org_mappers("darkhole-client")
+        configured_clients = 0
+        for client_id in KEYCLOAK_ORG_MAPPER_CLIENTS:
+            mappers = await keycloak_client.ensure_client_org_mappers(client_id)
+            if mappers:
+                configured_clients += 1
+                logger.info(
+                    "✅ Organization-scoped mappers configured for %s: %s",
+                    client_id,
+                    list(mappers.keys()),
+                )
+            else:
+                logger.warning("⚠️  No organization mappers configured for %s", client_id)
 
-        if mappers:
-            logger.info(f"✅ Organization-scoped mappers configured: {list(mappers.keys())}")
-        else:
-            logger.warning("⚠️  No organization mappers configured - DarkHole may not work properly")
+        if configured_clients == 0:
+            logger.warning("⚠️  No organization mappers configured for any client")
 
     except Exception as e:
         logger.warning(f"⚠️  Failed to auto-setup org mappers: {e}")

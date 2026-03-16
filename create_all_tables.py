@@ -42,6 +42,7 @@ def create_all_tables():
             Organization,
             OrganizationAppAccess,
             OrganizationUserRole,
+            OrganizationUserProfile,
         )
 
         logger.info("All models imported successfully")

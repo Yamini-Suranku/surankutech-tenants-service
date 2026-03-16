@@ -631,6 +631,7 @@ class KeycloakClient:
     async def authenticate_user(self, email: str, password: str) -> Dict[str, Any]:
         """Authenticate user with email and password using Keycloak"""
         try:
+            normalized_email = (email or "").strip().lower()
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/realms/{self.realm}/protocol/openid-connect/token",
@@ -638,7 +639,7 @@ class KeycloakClient:
                         "grant_type": "password",
                         "client_id": self.client_id,
                         "client_secret": self.client_secret,
-                        "username": email,
+                        "username": normalized_email,
                         "password": password,
                         "scope": "openid profile email"
                     }
@@ -653,9 +654,10 @@ class KeycloakClient:
                         # Check if user exists in our database to provide better error message
                         from shared.database import get_db
                         from shared.models import User
+                        from sqlalchemy import func
                         db = next(get_db())
                         try:
-                            user = db.query(User).filter(User.email == email).first()
+                            user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
                             if user and not user.is_email_verified:
                                 raise Exception("Please verify your email address before logging in. Check your inbox for the verification email.")
                         finally:

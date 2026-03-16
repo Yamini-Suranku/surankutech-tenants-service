@@ -18,9 +18,10 @@ from shared.auth import (
     require_platform_admin_access,
 )
 from shared.models import Tenant, UserTenant, TenantAppAccess, AuditLog, User
-from models import Organization, OrganizationAppAccess, OrganizationUserRole
+from models import Organization, OrganizationAppAccess, OrganizationUserRole, OrganizationUserProfile
 from schemas import (
     OrganizationCreateRequest,
+    OrganizationUpdateRequest,
     OrganizationDNSRequest,
     OrganizationListResponse,
     OrganizationResponse,
@@ -133,6 +134,7 @@ def _serialize_org(org: Organization, tenant: Optional[Tenant] = None) -> Dict[s
         "name": org.name,
         "slug": org.slug,
         "description": org.description,
+        "logo_url": org.logo_url,
         "dns_subdomain": org.dns_subdomain,
         "dns_zone": normalized_zone,
         "dns_hostname": normalized_hostname,
@@ -142,6 +144,14 @@ def _serialize_org(org: Organization, tenant: Optional[Tenant] = None) -> Dict[s
         "created_at": org.created_at,
         "updated_at": org.updated_at,
     }
+
+
+def _resolve_org_user_avatar(db: Session, org_id: str, user_id: str, fallback_avatar_url: Optional[str]) -> Optional[str]:
+    profile = db.query(OrganizationUserProfile).filter(
+        OrganizationUserProfile.organization_id == org_id,
+        OrganizationUserProfile.user_id == user_id,
+    ).first()
+    return profile.avatar_url if profile and profile.avatar_url else fallback_avatar_url
 
 def _build_org_hostname(org: Organization) -> str:
     return _normalize_dns_hostname(org.dns_hostname, org.dns_subdomain, org.dns_zone)
@@ -422,6 +432,55 @@ async def create_organization(
     db.commit()
     db.refresh(organization)
 
+    return OrganizationResponse(**_serialize_org(organization, tenant))
+
+
+@router.put("/tenants/{tenant_id}/orgs/{org_id}", response_model=OrganizationResponse)
+async def update_organization(
+    tenant_id: str,
+    org_id: str,
+    request: OrganizationUpdateRequest,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db)
+):
+    """Update organization details for the current tenant/org scope."""
+    user = get_or_create_user_from_token(db, token_data)
+    user_tenant = db.query(UserTenant).filter(
+        UserTenant.user_id == user.id,
+        UserTenant.tenant_id == tenant_id
+    ).first()
+
+    if not user_tenant:
+        raise HTTPException(status_code=403, detail="Access denied to tenant")
+
+    if not _user_has_tenant_admin_access(user_tenant):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    organization = db.query(Organization).filter(
+        Organization.id == org_id,
+        Organization.tenant_id == tenant_id,
+        Organization.deleted_at.is_(None)
+    ).first()
+    if not organization:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    if request.name:
+        organization.name = request.name.strip()
+    if request.description is not None:
+        organization.description = request.description.strip() if request.description else None
+
+    db.add(AuditLog(
+        tenant_id=tenant_id,
+        user_id=user.id,
+        action="organization_updated",
+        resource_type="organization",
+        resource_id=org_id,
+        details={"organization_name": organization.name, "description": organization.description},
+    ))
+    db.commit()
+    db.refresh(organization)
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     return OrganizationResponse(**_serialize_org(organization, tenant))
 
 @router.post("/tenants/{tenant_id}/orgs/{org_id}/dns/reserve", response_model=OrganizationResponse)
@@ -1040,14 +1099,54 @@ async def list_organization_users(
         UserTenant.tenant_id == tenant_id
     ).all()
 
-    for user in platform_users:
-        # Get user's roles from UserTenant
-        user_tenant = db.query(UserTenant).filter(
-            UserTenant.user_id == user.id,
-            UserTenant.tenant_id == tenant_id
-        ).first()
+    platform_user_ids = [user.id for user in platform_users]
 
-        app_roles = user_tenant.app_roles if user_tenant else {}
+    # Build tenant-level app role map once (fallback data)
+    tenant_role_rows = []
+    if platform_user_ids:
+        tenant_role_rows = db.query(UserTenant).filter(
+            UserTenant.tenant_id == tenant_id,
+            UserTenant.user_id.in_(platform_user_ids)
+        ).all()
+
+    tenant_app_roles_by_user: Dict[str, Dict[str, List[str]]] = {}
+    tenant_link_by_user: Dict[str, UserTenant] = {}
+    for row in tenant_role_rows:
+        roles = row.app_roles or {}
+        normalized: Dict[str, List[str]] = {}
+        for app_name, app_role_list in roles.items():
+            normalized[app_name] = list(app_role_list or [])
+        tenant_app_roles_by_user[row.user_id] = normalized
+        tenant_link_by_user[row.user_id] = row
+
+    # Build org-scoped app role map once (authoritative for this org)
+    org_role_rows = []
+    if platform_user_ids:
+        org_role_rows = db.query(OrganizationUserRole).filter(
+            OrganizationUserRole.organization_id == org_id,
+            OrganizationUserRole.user_id.in_(platform_user_ids)
+        ).all()
+
+    org_app_roles_by_user: Dict[str, Dict[str, List[str]]] = {}
+    for row in org_role_rows:
+        if row.user_id not in org_app_roles_by_user:
+            org_app_roles_by_user[row.user_id] = {}
+        org_app_roles_by_user[row.user_id][row.app_name] = list(row.roles or [])
+
+    def build_effective_app_roles(user_id: str) -> Dict[str, List[str]]:
+        """
+        Prefer org-scoped roles for this organization, with tenant app_roles as fallback.
+        """
+        base_roles = dict(tenant_app_roles_by_user.get(user_id, {}))
+        org_roles = org_app_roles_by_user.get(user_id, {})
+        for app_name, role_list in org_roles.items():
+            base_roles[app_name] = list(role_list or [])
+        return base_roles
+
+    for user in platform_users:
+        app_roles = build_effective_app_roles(user.id)
+        tenant_link = tenant_link_by_user.get(user.id)
+        last_active_at = user.last_login or (tenant_link.last_accessed_at if tenant_link else None)
 
         users.append({
             "id": user.id,
@@ -1056,10 +1155,14 @@ async def list_organization_users(
             "first_name": user.first_name,
             "last_name": user.last_name,
             "full_name": f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email,
+            "avatar_url": _resolve_org_user_avatar(db, org_id, user.id, user.avatar_url),
             "source": "platform",
             "status": "active",
+            "enabled": str(user.status or "").lower() == "active",
             "app_roles": app_roles,
             "created_at": user.created_at.isoformat() if user.created_at else None,
+            "last_login": user.last_login.isoformat() if user.last_login else None,
+            "last_active": last_active_at.isoformat() if last_active_at else None,
         })
 
     # Get directory users (Azure AD/LDAP synced users) if requested
@@ -1084,11 +1187,7 @@ async def list_organization_users(
 
                 app_roles = {}
                 if platform_user:
-                    user_tenant = db.query(UserTenant).filter(
-                        UserTenant.user_id == platform_user.id,
-                        UserTenant.tenant_id == tenant_id
-                    ).first()
-                    app_roles = user_tenant.app_roles if user_tenant else {}
+                    app_roles = build_effective_app_roles(platform_user.id)
 
                 users.append({
                     "id": dir_user.id,  # Use directory user ID for now
@@ -1100,8 +1199,15 @@ async def list_organization_users(
                     "source": "directory",
                     "provider": dir_user.provider_type,
                     "status": "synced" if app_roles else "directory_only",
+                    "enabled": bool(dir_user.enabled),
                     "app_roles": app_roles,
                     "created_at": dir_user.created_at.isoformat() if dir_user.created_at else None,
+                    "last_login": platform_user.last_login.isoformat() if platform_user and platform_user.last_login else None,
+                    "last_active": (
+                        platform_user.last_login.isoformat()
+                        if platform_user and platform_user.last_login
+                        else (dir_user.last_synced_at.isoformat() if dir_user.last_synced_at else None)
+                    ),
                 })
 
     return {

@@ -1,4 +1,4 @@
-./vendor/surankutech_shared-0.1.4-py3-none-any.whl
+./vendor/surankutech_shared-0.1.6-py3-none-any.whl
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 sqlalchemy==2.0.23

@@ -16,6 +16,12 @@ from modules.keycloak_client import KeycloakClient
 
 CLIENTS = [
     {
+        "client_id": "platform-frontend",
+        "app_name": "platform",
+        "display_name": "Platform Frontend",
+        "create_if_missing": False,
+    },
+    {
         "client_id": "darkhole-client",
         "app_name": "darkhole",
         "display_name": "DarkHole",

@@ -12,6 +12,7 @@ import uuid
 from pydantic import BaseModel, EmailStr
 
 from shared.database import get_db
+from sqlalchemy import func
 from shared.auth import verify_token, TokenData, get_current_token_data
 from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
 from shared.email_verification import EmailVerificationService
@@ -39,6 +40,10 @@ def _safe_name(value: str | None, fallback: str = "") -> str:
         return fallback
     return value
 
+
+def _normalize_email(value: str | None) -> str:
+    return (value or "").strip().lower()
+
 class UserRegisterRequest(BaseModel):
     email: str
     password: str
@@ -61,8 +66,10 @@ async def register_user(
     try:
         keycloak_client = KeycloakClient()
 
+        normalized_email = _normalize_email(request.email)
+
         # Check if user already exists
-        existing_user = db.query(User).filter(User.email == request.email).first()
+        existing_user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
         if existing_user:
             if existing_user.is_email_verified:
                 raise HTTPException(status_code=400, detail="User with this email already exists")
@@ -80,7 +87,7 @@ async def register_user(
         # Create user in PENDING state (requires email verification)
         # No default tenant/organization is created - user will create org from admin center
         user = User(
-            email=request.email,
+            email=normalized_email,
             first_name=request.first_name,
             last_name=request.last_name,
             status=UserStatus.PENDING,  # Start as PENDING until email verified
@@ -91,7 +98,7 @@ async def register_user(
 
         # Create Keycloak user (no tenant context, just basic platform user)
         keycloak_user_id = await keycloak_client.create_platform_user(
-            email=request.email,
+            email=normalized_email,
             password=request.password,
             first_name=request.first_name,
             last_name=request.last_name
@@ -136,14 +143,16 @@ async def login_user(
     try:
         keycloak_client = KeycloakClient()
 
+        normalized_email = _normalize_email(request.email)
+
         # Authenticate with Keycloak
-        auth_result = await keycloak_client.authenticate_user(request.email, request.password)
+        auth_result = await keycloak_client.authenticate_user(normalized_email, request.password)
 
         # Get user info from Keycloak response
         user_info = auth_result["user_info"]
 
         # Find user in our database
-        user = db.query(User).filter(User.email == request.email).first()
+        user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -251,6 +260,8 @@ async def login_user(
             current_tenant=current_tenant_object
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Login error: {e}")
         if "Authentication failed" in str(e):
@@ -411,16 +422,18 @@ async def forgot_password(
 ):
     """Send password reset email"""
     try:
+        normalized_email = _normalize_email(request.email)
+
         # Find user by email
-        user = db.query(User).filter(User.email == request.email).first()
+        user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
 
         # Always return success to prevent email enumeration
         if not user:
-            logger.warning(f"Password reset requested for non-existent email: {request.email}")
+            logger.warning(f"Password reset requested for non-existent email: {normalized_email}")
             return {"message": "If an account with that email exists, you will receive a password reset link"}
 
         if not user.keycloak_id:
-            logger.warning(f"Password reset requested for social login user: {request.email}")
+            logger.warning(f"Password reset requested for social login user: {normalized_email}")
             return {"message": "If an account with that email exists, you will receive a password reset link"}
 
         # Generate reset token
@@ -632,14 +645,16 @@ async def select_application(
     This endpoint allows users to select which application they want to access
     """
     try:
+        normalized_email = _normalize_email(request.email)
+
         # First verify the user credentials (similar to login)
-        user = db.query(User).filter(User.email == request.email).first()
+        user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
         if not user:
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         # Get user's Keycloak authentication
         keycloak_client = KeycloakClient()
-        keycloak_response = await keycloak_client.authenticate_user(request.email, request.password)
+        keycloak_response = await keycloak_client.authenticate_user(normalized_email, request.password)
 
         if not keycloak_response:
             raise HTTPException(status_code=401, detail="Authentication failed")

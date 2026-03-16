@@ -19,10 +19,12 @@ from models import (
     OrganizationGroup,
     OrganizationGroupMembership,
     Organization,
+    DirectoryUser,
     DirectoryGroup,
     DirectoryGroupMembership,
     TenantLDAPConfig,
 )
+from modules.organization_roles import reconcile_organization_user_roles
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/platform/organizations", tags=["organization-groups"])
@@ -62,6 +64,75 @@ class OrganizationGroupResponse(BaseModel):
 
 class GroupMembershipUpdate(BaseModel):
     user_ids: List[str] = Field(..., description="List of user IDs to set as group members")
+
+
+@router.get("/{organization_id}/group-memberships")
+async def get_organization_group_memberships(
+    organization_id: str,
+    include_directory: bool = True,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Get all group memberships for an organization in a single response."""
+    try:
+        org = db.query(Organization).filter(
+            Organization.id == organization_id,
+            Organization.deleted_at.is_(None)
+        ).first()
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+        _require_org_admin_access(db, current_user.user_id, org)
+
+        memberships: List[Dict[str, Any]] = []
+
+        manual_rows = (
+            db.query(OrganizationGroup, OrganizationGroupMembership, User)
+            .join(OrganizationGroupMembership, OrganizationGroupMembership.organization_group_id == OrganizationGroup.id)
+            .join(User, OrganizationGroupMembership.user_id == User.id)
+            .filter(OrganizationGroup.organization_id == organization_id)
+            .all()
+        )
+        for group, membership, user in manual_rows:
+            memberships.append({
+                "group_id": group.id,
+                "group_name": group.name,
+                "display_name": group.display_name,
+                "source_type": group.source_type,
+                "user_id": user.id,
+                "email": user.email,
+                "joined_at": membership.created_at.isoformat() if membership.created_at else None,
+            })
+
+        if include_directory:
+            directory_rows = (
+                db.query(DirectoryGroup, DirectoryGroupMembership, DirectoryUser)
+                .join(DirectoryGroupMembership, DirectoryGroupMembership.directory_group_id == DirectoryGroup.id)
+                .join(DirectoryUser, DirectoryGroupMembership.directory_user_id == DirectoryUser.id)
+                .filter(
+                    DirectoryGroup.organization_id == organization_id,
+                    DirectoryGroup.provider_type.in_(["azure_ad_graph", "ldap"]),
+                )
+                .all()
+            )
+            for group, membership, directory_user in directory_rows:
+                memberships.append({
+                    "group_id": group.external_id,
+                    "group_name": group.display_name or group.name,
+                    "display_name": group.display_name,
+                    "source_type": group.provider_type,
+                    "user_id": None,
+                    "email": directory_user.email,
+                    "joined_at": membership.created_at.isoformat() if membership.created_at else None,
+                })
+
+        return {"memberships": memberships, "count": len(memberships)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get organization group memberships: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get organization group memberships")
 
 
 def _require_org_admin_access(db: Session, user_id: str, org: Organization):
@@ -291,6 +362,16 @@ async def update_organization_group(
 
         group.updated_at = datetime.utcnow()
 
+        # Keep org user roles in sync with group role mappings.
+        db_user = db.query(User).filter(User.keycloak_id == current_user.user_id).first()
+        actor_user_id = db_user.id if db_user else None
+        reconcile_organization_user_roles(
+            db,
+            tenant_id=org.tenant_id,
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+        )
+
         db.commit()
         db.refresh(group)
 
@@ -349,6 +430,14 @@ async def delete_organization_group(
 
         # Delete the group (memberships will cascade)
         db.delete(group)
+        db_user = db.query(User).filter(User.keycloak_id == current_user.user_id).first()
+        actor_user_id = db_user.id if db_user else None
+        reconcile_organization_user_roles(
+            db,
+            tenant_id=org.tenant_id,
+            organization_id=organization_id,
+            actor_user_id=actor_user_id,
+        )
         db.commit()
 
         return {"message": "Group deleted successfully"}
@@ -463,6 +552,13 @@ async def update_group_members(
                 created_by=created_by_id
             )
             db.add(membership)
+
+        reconcile_organization_user_roles(
+            db,
+            tenant_id=org.tenant_id,
+            organization_id=organization_id,
+            actor_user_id=created_by_id,
+        )
 
         db.commit()
 

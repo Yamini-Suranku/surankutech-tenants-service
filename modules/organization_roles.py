@@ -1,11 +1,11 @@
 """Organization user role management endpoints"""
 from __future__ import annotations
 
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from datetime import datetime
 import logging
 
@@ -14,7 +14,13 @@ from shared.auth import TokenData, get_current_token_data
 from shared.models import User, UserTenant
 from modules.tenant_management import get_or_create_user_from_token
 from modules.organization_management import APP_CATALOG, _user_has_tenant_admin_access
-from models import Organization, OrganizationUserRole, TenantLDAPSyncHistory
+from models import (
+    Organization,
+    OrganizationUserRole,
+    TenantLDAPSyncHistory,
+    OrganizationGroup,
+    OrganizationGroupMembership,
+)
 
 router = APIRouter(tags=["organization-roles"])
 logger = logging.getLogger(__name__)
@@ -77,6 +83,147 @@ def _require_tenant_admin(db: Session, tenant_id: str, token_data: TokenData) ->
         raise HTTPException(status_code=403, detail="Tenant admin access required")
     return user_tenant
 
+
+def _merge_app_roles(
+    base_roles: Dict[str, List[str]],
+    additional_roles: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    merged: Dict[str, List[str]] = {app: sorted(set(roles or [])) for app, roles in (base_roles or {}).items()}
+    for app_name, roles in (additional_roles or {}).items():
+        if not roles:
+            continue
+        existing = set(merged.get(app_name, []))
+        existing.update(roles)
+        merged[app_name] = sorted(existing)
+    return merged
+
+
+def _normalize_role_list(roles: Optional[List[str]]) -> List[str]:
+    if not roles:
+        return []
+    return sorted({str(role).strip() for role in roles if isinstance(role, str) and str(role).strip()})
+
+
+def _normalize_app_role_mapping(app_role_mappings: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
+    normalized: Dict[str, List[str]] = {}
+    if not isinstance(app_role_mappings, dict):
+        return normalized
+    for app_name, roles in app_role_mappings.items():
+        if not isinstance(app_name, str):
+            continue
+        if isinstance(roles, list):
+            normalized_roles = _normalize_role_list(roles)
+        elif roles is None:
+            normalized_roles = []
+        else:
+            normalized_roles = _normalize_role_list([str(roles)])
+        if normalized_roles:
+            normalized[app_name] = normalized_roles
+    return normalized
+
+
+def reconcile_organization_user_roles(
+    db: Session,
+    tenant_id: str,
+    organization_id: str,
+    actor_user_id: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    Reconcile org user roles by materializing group role mappings into organization_user_roles.
+
+    Because organization_user_roles has a unique row per (org, user, app), group-derived roles are
+    tracked in metadata_json["group_roles"], then merged with direct roles (manual/invitation/etc).
+    """
+    org = db.query(Organization).filter(
+        Organization.id == organization_id,
+        Organization.tenant_id == tenant_id,
+        Organization.deleted_at.is_(None),
+    ).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    group_entries = db.query(
+        OrganizationGroupMembership.user_id,
+        OrganizationGroup.app_role_mappings,
+    ).join(
+        OrganizationGroup,
+        OrganizationGroup.id == OrganizationGroupMembership.organization_group_id,
+    ).filter(
+        OrganizationGroup.organization_id == organization_id,
+        OrganizationGroup.tenant_id == tenant_id,
+    ).all()
+
+    derived_group_roles: Dict[Tuple[str, str], List[str]] = {}
+    for user_id, app_role_mappings in group_entries:
+        normalized = _normalize_app_role_mapping(app_role_mappings)
+        for app_name, roles in normalized.items():
+            key = (user_id, app_name)
+            merged = set(derived_group_roles.get(key, []))
+            merged.update(roles)
+            derived_group_roles[key] = sorted(merged)
+
+    existing_rows = db.query(OrganizationUserRole).filter(
+        OrganizationUserRole.tenant_id == tenant_id,
+        OrganizationUserRole.organization_id == organization_id,
+    ).all()
+    existing_map: Dict[Tuple[str, str], OrganizationUserRole] = {
+        (row.user_id, row.app_name): row for row in existing_rows
+    }
+
+    touched = 0
+    created = 0
+    deleted = 0
+
+    all_keys = set(existing_map.keys()) | set(derived_group_roles.keys())
+    for key in all_keys:
+        user_id, app_name = key
+        entry = existing_map.get(key)
+        new_group_roles = _normalize_role_list(derived_group_roles.get(key, []))
+
+        metadata = dict(entry.metadata_json or {}) if entry else {}
+        old_group_roles = _normalize_role_list(metadata.get("group_roles"))
+        current_roles = _normalize_role_list(entry.roles if entry else [])
+        direct_roles = sorted(set(current_roles) - set(old_group_roles))
+        effective_roles = sorted(set(direct_roles) | set(new_group_roles))
+
+        if entry:
+            if not effective_roles:
+                db.delete(entry)
+                deleted += 1
+                continue
+
+            metadata["group_roles"] = new_group_roles
+            if (entry.roles or []) != effective_roles or (entry.metadata_json or {}) != metadata:
+                entry.roles = effective_roles
+                entry.metadata_json = metadata
+                entry.updated_at = datetime.utcnow()
+                if new_group_roles and entry.granted_via in (None, "", "group_mapping"):
+                    entry.granted_via = "group_mapping"
+                    entry.granted_by = actor_user_id
+                touched += 1
+            continue
+
+        if effective_roles:
+            metadata["group_roles"] = new_group_roles
+            db.add(OrganizationUserRole(
+                tenant_id=tenant_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                app_name=app_name,
+                roles=effective_roles,
+                granted_by=actor_user_id,
+                granted_via="group_mapping" if new_group_roles else "manual",
+                metadata_json=metadata,
+            ))
+            created += 1
+
+    return {
+        "created": created,
+        "updated": touched,
+        "deleted": deleted,
+        "group_derived_pairs": len(derived_group_roles),
+    }
+
 @router.get("/tenants/{tenant_id}/orgs/{org_id}/roles", response_model=OrgRoleListResponse)
 async def list_org_roles(
     tenant_id: str,
@@ -138,14 +285,50 @@ async def list_org_roles(
                 if not existing or _history_sort_key(history) >= _history_sort_key(existing):
                     meta["latest_history"] = history
 
+    # Merge organization group role mappings into user role view so Org Users reflects
+    # roles granted via manual groups as well (not only direct OrganizationUserRole rows).
+    group_entries = db.query(
+        OrganizationGroupMembership.user_id,
+        OrganizationGroup.app_role_mappings,
+    ).join(
+        OrganizationGroup,
+        OrganizationGroup.id == OrganizationGroupMembership.organization_group_id,
+    ).filter(
+        OrganizationGroup.organization_id == org_id,
+    ).all()
+
+    group_role_map: Dict[str, Dict[str, List[str]]] = {}
+    for user_id, app_role_mappings in group_entries:
+        if not isinstance(app_role_mappings, dict):
+            continue
+        normalized: Dict[str, List[str]] = {}
+        for app_name, roles in app_role_mappings.items():
+            if not isinstance(app_name, str):
+                continue
+            if isinstance(roles, list):
+                normalized_roles = [str(role) for role in roles if isinstance(role, str)]
+            elif roles is None:
+                normalized_roles = []
+            else:
+                normalized_roles = [str(roles)]
+            if normalized_roles:
+                normalized[app_name] = normalized_roles
+        if not normalized:
+            continue
+        group_role_map[user_id] = _merge_app_roles(group_role_map.get(user_id, {}), normalized)
+
     payloads: List[OrgUserRolePayload] = []
     for user, user_tenant in tenant_users:
-        entry_roles = role_map.get(user.id, {})
+        direct_roles = role_map.get(user.id, {})
+        group_roles = group_role_map.get(user.id, {})
+        entry_roles = _merge_app_roles(direct_roles, group_roles)
         meta = user_meta.get(user.id, {
             "directory_synced": False,
             "membership_source": "manual",
             "latest_history": None,
         })
+        if group_roles and meta.get("membership_source") == "manual":
+            meta["membership_source"] = "group_mapping"
         payloads.append(
             OrgUserRolePayload(
                 user_id=user.id,
@@ -298,7 +481,7 @@ async def get_user_org_roles_for_keycloak(
     """
     try:
         # Find user by email
-        user = db.query(User).filter(User.email == user_email).first()
+        user = db.query(User).filter(func.lower(User.email) == (user_email or "").strip().lower()).first()
         if not user:
             return {"app_roles": {}, "error": "User not found"}
 
@@ -360,3 +543,26 @@ async def get_user_org_roles_for_keycloak(
     except Exception as e:
         logger.error(f"Error getting org roles for {user_email} in {org_subdomain}: {e}")
         return {"app_roles": {"platform": ["user"]}, "error": str(e)}
+
+
+@router.post("/tenants/{tenant_id}/orgs/{org_id}/roles/reconcile")
+async def reconcile_org_roles_endpoint(
+    tenant_id: str,
+    org_id: str,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db),
+):
+    actor = _require_tenant_admin(db, tenant_id, token_data)
+    result = reconcile_organization_user_roles(
+        db,
+        tenant_id=tenant_id,
+        organization_id=org_id,
+        actor_user_id=actor.user_id,
+    )
+    db.commit()
+    return {
+        "status": "ok",
+        "tenant_id": tenant_id,
+        "organization_id": org_id,
+        **result,
+    }

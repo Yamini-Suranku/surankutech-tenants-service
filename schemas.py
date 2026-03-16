@@ -103,12 +103,18 @@ class OrganizationDNSRequest(BaseModel):
     desired_subdomain: str = Field(..., min_length=3, max_length=63)
     dns_zone: Optional[str] = Field(None, max_length=255)
 
+
+class OrganizationUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=255)
+    description: Optional[str] = Field(None, max_length=1000)
+
 class OrganizationResponse(BaseModel):
     id: str
     tenant_id: str
     name: str
     slug: str
     description: Optional[str] = None
+    logo_url: Optional[str] = None
     dns_subdomain: str
     dns_zone: Optional[str] = None
     dns_hostname: Optional[str] = None
@@ -432,6 +438,7 @@ class DomainVerificationResponse(BaseModel):
 
 class AuditLogResponse(BaseModel):
     id: str
+    organization_id: Optional[str] = None
     action: str
     resource_type: str
     resource_id: str
@@ -448,6 +455,7 @@ class AuditLogResponse(BaseModel):
 class AuditLogSearchRequest(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
+    organization_id: Optional[str] = None
     action: Optional[str] = None
     resource_type: Optional[str] = None
     user_id: Optional[str] = None

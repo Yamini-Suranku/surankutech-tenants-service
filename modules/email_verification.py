@@ -6,6 +6,7 @@ Handles email verification endpoints and functionality
 from fastapi import APIRouter, Depends, HTTPException, Body
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import logging
 import os
 
@@ -149,8 +150,8 @@ async def resend_verification_email(
 ):
     """Resend verification email"""
     try:
-        # Find user
-        user = db.query(User).filter(User.email == payload.email).first()
+        # Find user (case-insensitive email)
+        user = db.query(User).filter(func.lower(User.email) == payload.email.strip().lower()).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 

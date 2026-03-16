@@ -6,6 +6,7 @@ Handles user profile updates, password changes, and profile information retrieva
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from pydantic import BaseModel, EmailStr
 import logging
 from typing import Optional
@@ -14,7 +15,7 @@ import hashlib
 from shared.database import get_db
 from shared.auth import verify_token, TokenData
 from shared.models import User, UserTenant, AuditLog
-from models import SocialAccount, PasswordResetToken, Invitation
+from models import SocialAccount, PasswordResetToken, Invitation, OrganizationUserProfile
 from modules.keycloak_client import KeycloakClient
 from datetime import datetime, timedelta
 
@@ -44,6 +45,34 @@ class ProfileResponse(BaseModel):
     is_email_verified: bool
     app_roles: Optional[dict] = None
 
+
+def _resolve_current_org_id(token_data: TokenData) -> Optional[str]:
+    current_org = getattr(token_data, "current_org", {}) or {}
+    if isinstance(current_org, dict):
+        org_id = current_org.get("org_id") or current_org.get("organization_id") or current_org.get("id")
+        if org_id:
+            return str(org_id)
+
+    memberships = getattr(token_data, "org_memberships", None) or []
+    if isinstance(memberships, list):
+        for membership in memberships:
+            org_id = membership.get("org_id") or membership.get("organization_id") or membership.get("id")
+            if org_id:
+                return str(org_id)
+    return None
+
+
+def _resolve_avatar_url(db: Session, user: User, token_data: TokenData) -> Optional[str]:
+    org_id = _resolve_current_org_id(token_data)
+    if org_id:
+        org_profile = db.query(OrganizationUserProfile).filter(
+            OrganizationUserProfile.organization_id == org_id,
+            OrganizationUserProfile.user_id == user.id,
+        ).first()
+        if org_profile and org_profile.avatar_url:
+            return org_profile.avatar_url
+    return user.avatar_url
+
 @router.get("/user/profile", response_model=ProfileResponse)
 async def get_user_profile(
     token: str = Depends(HTTPBearer()),
@@ -68,7 +97,7 @@ async def get_user_profile(
         email=user.email,
         first_name=user.first_name,
         last_name=user.last_name,
-        avatar_url=user.avatar_url,
+        avatar_url=_resolve_avatar_url(db, user, token_data),
         status=user.status,
         is_email_verified=user.is_email_verified,
         app_roles=app_roles
@@ -94,15 +123,16 @@ async def update_user_profile(
     if request.last_name is not None:
         user.last_name = request.last_name
     if request.email is not None:
+        normalized_email = request.email.strip().lower()
         # Check if email is already taken by another user
         existing_user = db.query(User).filter(
-            User.email == request.email,
+            func.lower(User.email) == normalized_email,
             User.id != user.id
         ).first()
         if existing_user:
             raise HTTPException(status_code=400, detail="Email already in use")
 
-        user.email = request.email
+        user.email = normalized_email
         # Note: If email changes, may need to update in Keycloak too
         if user.keycloak_id:
             try:
@@ -127,7 +157,7 @@ async def update_user_profile(
         email=user.email,
         first_name=user.first_name,
         last_name=user.last_name,
-        avatar_url=user.avatar_url,
+        avatar_url=_resolve_avatar_url(db, user, token_data),
         status=user.status,
         is_email_verified=user.is_email_verified,
         app_roles=app_roles

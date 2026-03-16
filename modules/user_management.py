@@ -6,6 +6,7 @@ Handles user listing, invitations, and user-related operations
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import logging
 import os
 from datetime import datetime, timedelta
@@ -16,6 +17,7 @@ from shared.auth import verify_token, require_tenant_access, TokenData
 from shared.models import User, UserTenant, TenantAppAccess, AuditLog
 from models import Invitation, SocialAccount, Organization, OrganizationUserRole
 from modules.organization_management import DEFAULT_DNS_ZONE
+from modules.organization_roles import reconcile_organization_user_roles
 from modules.tenant_management import user_has_tenant_admin
 from schemas import (
     UserInviteRequest, InvitationResponse, UserResponse, UserUpdateRequest,
@@ -75,6 +77,10 @@ def _normalize_invite_app_roles(app_roles: Optional[dict]) -> dict:
         if clean_roles:
             normalized[app_name] = clean_roles
     return normalized
+
+
+def _normalize_email(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
 
 def _upsert_org_roles(
     db: Session,
@@ -212,7 +218,8 @@ async def invite_user(
     db: Session = Depends(get_db)
 ):
     """Invite user to tenant"""
-    logger.info(f"🔔 INVITE_USER ENDPOINT CALLED for tenant: {tenant_id}, email: {request.email}")
+    invited_email = _normalize_email(request.email)
+    logger.info(f"🔔 INVITE_USER ENDPOINT CALLED for tenant: {tenant_id}, email: {invited_email}")
     token_data = await verify_token(token.credentials)
     logger.info(f"🔔 TOKEN VERIFIED for user: {token_data.sub}")
 
@@ -288,12 +295,12 @@ async def invite_user(
             )
 
     # Check for existing invitation first
-    logger.info(f"Checking for existing invitation: tenant_id={tenant_id}, email={request.email}")
+    logger.info(f"Checking for existing invitation: tenant_id={tenant_id}, email={invited_email}")
     existing_invitation = (
         db.query(Invitation)
         .filter(
             Invitation.tenant_id == tenant_id,
-            Invitation.email == request.email,
+            func.lower(Invitation.email) == invited_email,
             Invitation.status == "pending"
         )
         .order_by(Invitation.created_at.desc())
@@ -313,7 +320,7 @@ async def invite_user(
                 remaining_minutes = (cooldown_time - datetime.utcnow()).total_seconds() / 60
                 raise HTTPException(
                     status_code=429,  # Too Many Requests
-                    detail=f"Please wait {int(remaining_minutes)} more minutes before resending invitation to {request.email}"
+                    detail=f"Please wait {int(remaining_minutes)} more minutes before resending invitation to {invited_email}"
                 )
 
         # Update existing pending invitation (resend)
@@ -328,13 +335,14 @@ async def invite_user(
         if org_hostname:
             existing_invitation.organization_hostname = org_hostname
         invitation = existing_invitation
-        logger.info(f"Resending invitation for {request.email} (attempt #{invitation.resent_count})")
+        invitation.email = invited_email
+        logger.info(f"Resending invitation for {invited_email} (attempt #{invitation.resent_count})")
     else:
         # Create new invitation
         invitation = Invitation(
             id=str(uuid.uuid4()),
             tenant_id=tenant_id,
-            email=request.email,
+            email=invited_email,
             app_roles=invite_app_roles,
             invited_by=current_user.id,
             expires_at=datetime.utcnow() + timedelta(days=7),
@@ -343,7 +351,7 @@ async def invite_user(
             organization_hostname=org_hostname
         )
         db.add(invitation)
-        logger.info(f"Created new invitation for {request.email}")
+        logger.info(f"Created new invitation for {invited_email}")
 
     db.commit()
 
@@ -966,10 +974,11 @@ async def bulk_invite_users(
     try:
         for invite_request in request.invitations:
             try:
+                invited_email = _normalize_email(invite_request.email)
                 invite_app_roles = _normalize_invite_app_roles(invite_request.app_roles)
                 if not invite_app_roles:
                     results["failed"].append({
-                        "email": invite_request.email,
+                        "email": invited_email,
                         "reason": "At least one app role must be provided"
                     })
                     continue
@@ -977,19 +986,19 @@ async def bulk_invite_users(
                 # Check if email already invited or exists
                 existing_invitation = db.query(Invitation).filter(
                     Invitation.tenant_id == tenant_id,
-                    Invitation.email == invite_request.email,
+                    func.lower(Invitation.email) == invited_email,
                     Invitation.status.in_(["pending", "sent"])
                 ).first()
 
                 if existing_invitation:
                     results["failed"].append({
-                        "email": invite_request.email,
+                        "email": invited_email,
                         "reason": "Already has pending invitation"
                     })
                     continue
 
                 # Check if user already exists in tenant
-                existing_user = db.query(User).filter(User.email == invite_request.email).first()
+                existing_user = db.query(User).filter(func.lower(User.email) == invited_email).first()
                 if existing_user:
                     existing_user_tenant = db.query(UserTenant).filter(
                         UserTenant.user_id == existing_user.id,
@@ -998,7 +1007,7 @@ async def bulk_invite_users(
 
                     if existing_user_tenant:
                         results["failed"].append({
-                            "email": invite_request.email,
+                            "email": invited_email,
                             "reason": "User already exists in tenant"
                         })
                         continue
@@ -1021,7 +1030,7 @@ async def bulk_invite_users(
 
                 if validation_error:
                     results["failed"].append({
-                        "email": invite_request.email,
+                        "email": invited_email,
                         "reason": validation_error
                     })
                     continue
@@ -1030,7 +1039,7 @@ async def bulk_invite_users(
                 invitation = Invitation(
                     id=str(uuid.uuid4()),
                     tenant_id=tenant_id,
-                    email=invite_request.email,
+                    email=invited_email,
                     app_roles=invite_app_roles,
                     invited_by=current_user.id,
                     expires_at=datetime.utcnow() + timedelta(days=7),
@@ -1076,7 +1085,7 @@ async def bulk_invite_users(
             except Exception as e:
                 logger.error(f"Error creating invitation for {invite_request.email}: {e}")
                 results["failed"].append({
-                    "email": invite_request.email,
+                    "email": _normalize_email(invite_request.email),
                     "reason": f"Internal error: {str(e)}"
                 })
 
@@ -1168,13 +1177,21 @@ async def get_invitation_info(
         from shared.models import Tenant
         tenant = db.query(Tenant).filter(Tenant.id == invitation.tenant_id).first()
         inviter = db.query(User).filter(User.id == invitation.invited_by).first()
-        existing_user = db.query(User).filter(User.email == invitation.email).first()
+        organization = None
+        if invitation.organization_id:
+            organization = db.query(Organization).filter(
+                Organization.id == invitation.organization_id,
+                Organization.tenant_id == invitation.tenant_id,
+                Organization.deleted_at.is_(None)
+            ).first()
+        existing_user = db.query(User).filter(func.lower(User.email) == _normalize_email(invitation.email)).first()
 
         return {
             "status": "valid",
             "invitation_id": invitation_id,
             "email": invitation.email,
             "tenant_name": tenant.name if tenant else "Unknown Organization",
+            "organization_name": organization.name if organization and organization.name else (tenant.name if tenant else "Unknown Organization"),
             "inviter_name": f"{inviter.first_name} {inviter.last_name}" if inviter else "Admin",
             "app_roles": invitation.app_roles,
             "expires_at": invitation.expires_at.isoformat() if invitation.expires_at else None,
@@ -1227,7 +1244,8 @@ async def accept_invitation(
                 raise HTTPException(status_code=404, detail="Organization not found for this invitation")
 
         # Check if user with this email already exists
-        existing_user = db.query(User).filter(User.email == invitation.email).first()
+        invitation_email = _normalize_email(invitation.email)
+        existing_user = db.query(User).filter(func.lower(User.email) == invitation_email).first()
 
         if existing_user:
             # User exists, check if already in tenant
@@ -1249,6 +1267,12 @@ async def accept_invitation(
                         app_roles=invitation.app_roles,
                         granted_by=invitation.invited_by,
                         granted_via="invitation"
+                    )
+                    reconcile_organization_user_roles(
+                        db,
+                        tenant_id=invitation.tenant_id,
+                        organization_id=target_org.id,
+                        actor_user_id=invitation.invited_by,
                     )
                 db.commit()
 
@@ -1277,6 +1301,12 @@ async def accept_invitation(
                         app_roles=invitation.app_roles,
                         granted_by=invitation.invited_by,
                         granted_via="invitation"
+                    )
+                    reconcile_organization_user_roles(
+                        db,
+                        tenant_id=invitation.tenant_id,
+                        organization_id=target_org.id,
+                        actor_user_id=invitation.invited_by,
                     )
                     # Also persist org_app_roles in Keycloak attribute if user has keycloak_id
                     if existing_user.keycloak_id:
@@ -1316,7 +1346,7 @@ async def accept_invitation(
 
         new_user = User(
             id=str(uuid.uuid4()),
-            email=invitation.email,
+            email=invitation_email,
             first_name=request.first_name,
             last_name=request.last_name,
             is_email_verified=True,  # Skip email verification for invited users
@@ -1373,6 +1403,12 @@ async def accept_invitation(
                 app_roles=invitation.app_roles,
                 granted_by=invitation.invited_by,
                 granted_via="invitation"
+            )
+            reconcile_organization_user_roles(
+                db,
+                tenant_id=invitation.tenant_id,
+                organization_id=target_org.id,
+                actor_user_id=invitation.invited_by,
             )
             if new_user.keycloak_id:
                 from modules.keycloak_client import KeycloakClient

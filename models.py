@@ -197,6 +197,7 @@ class Organization(Base):
     name = Column(String(255), nullable=False)
     slug = Column(String(255), nullable=False, index=True)  # Removed unique constraint - unique per tenant
     description = Column(Text, nullable=True)
+    logo_url = Column(String(500), nullable=True)
 
     # DNS configuration - now optional since multiple orgs can share tenant domain
     dns_subdomain = Column(String(255), nullable=True, index=True)
@@ -282,6 +283,23 @@ class OrganizationUserRole(Base):
     __table_args__ = (
         UniqueConstraint('organization_id', 'user_id', 'app_name', name='uix_org_user_app'),
         Index('idx_org_user_roles_user', 'tenant_id', 'organization_id', 'user_id'),
+    )
+
+
+class OrganizationUserProfile(Base):
+    __tablename__ = "organization_user_profiles"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    avatar_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'user_id', name='uix_org_user_profile'),
+        Index('idx_org_user_profiles_lookup', 'tenant_id', 'organization_id', 'user_id'),
     )
 
 class PasswordResetToken(Base):
