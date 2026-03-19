@@ -13,7 +13,16 @@ import uuid
 from shared.database import get_db
 from shared.auth import get_current_user
 from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
-from models import Organization, OrganizationAppAccess, OrganizationUserRole, TenantSettings
+from models import (
+    DirectoryUser,
+    Organization,
+    OrganizationAppAccess,
+    OrganizationGroup,
+    OrganizationGroupMembership,
+    OrganizationUserProfile,
+    OrganizationUserRole,
+    TenantSettings,
+)
 from schemas import (
     OrganizationCreateRequest,
     OrganizationResponse,
@@ -25,7 +34,8 @@ from modules.tenant_management import (
     generate_domain_suggestions,
     seed_app_access_metadata,
     mark_app_for_enable,
-    get_trial_features
+    get_trial_features,
+    user_has_tenant_admin,
 )
 
 logger = logging.getLogger(__name__)
@@ -409,3 +419,194 @@ async def get_organization(
     except Exception as e:
         logger.error(f"Failed to get organization: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get organization: {str(e)}")
+
+
+@router.get("/{organization_id}/users")
+async def get_organization_users(
+    organization_id: str,
+    include_directory: bool = True,
+    include_groups: bool = True,
+    include_roles: bool = True,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Get organization users through an org-scoped API."""
+    try:
+        org = db.query(Organization).filter(
+            Organization.id == organization_id,
+            Organization.deleted_at.is_(None)
+        ).first()
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+
+        tenant_membership = db.query(UserTenant).filter(
+            UserTenant.user_id == current_user["id"],
+            UserTenant.tenant_id == org.tenant_id,
+            UserTenant.status == "active",
+        ).first()
+        if not tenant_membership:
+            raise HTTPException(status_code=403, detail="Access denied to tenant")
+
+        user_role = db.query(OrganizationUserRole).filter(
+            OrganizationUserRole.organization_id == organization_id,
+            OrganizationUserRole.user_id == current_user["id"]
+        ).first()
+        if not (user_has_tenant_admin(tenant_membership) or user_role):
+            raise HTTPException(status_code=403, detail="Access denied to this organization")
+
+        org_role_user_ids = {
+            row[0] for row in db.query(OrganizationUserRole.user_id).filter(
+                OrganizationUserRole.organization_id == organization_id,
+            ).all()
+        }
+        org_group_user_ids = {
+            row[0] for row in db.query(OrganizationGroupMembership.user_id).join(
+                OrganizationGroup,
+                OrganizationGroup.id == OrganizationGroupMembership.organization_group_id,
+            ).filter(
+                OrganizationGroup.organization_id == organization_id,
+            ).all()
+        }
+        platform_user_ids = sorted(org_role_user_ids | org_group_user_ids)
+
+        platform_users = db.query(User).join(
+            UserTenant, UserTenant.user_id == User.id
+        ).filter(
+            UserTenant.tenant_id == org.tenant_id,
+            User.id.in_(platform_user_ids) if platform_user_ids else False,
+        ).all()
+        tenant_role_rows = []
+        if platform_user_ids:
+            tenant_role_rows = db.query(UserTenant).filter(
+                UserTenant.tenant_id == org.tenant_id,
+                UserTenant.user_id.in_(platform_user_ids)
+            ).all()
+
+        tenant_app_roles_by_user: Dict[str, Dict[str, List[str]]] = {}
+        tenant_link_by_user: Dict[str, UserTenant] = {}
+        for row in tenant_role_rows:
+            roles = row.app_roles or {}
+            normalized: Dict[str, List[str]] = {}
+            for app_name, app_role_list in roles.items():
+                normalized[app_name] = list(app_role_list or [])
+            tenant_app_roles_by_user[row.user_id] = normalized
+            tenant_link_by_user[row.user_id] = row
+
+        org_app_roles_by_user: Dict[str, Dict[str, List[str]]] = {}
+        if platform_user_ids and include_roles:
+            org_role_rows = db.query(OrganizationUserRole).filter(
+                OrganizationUserRole.organization_id == organization_id,
+                OrganizationUserRole.user_id.in_(platform_user_ids)
+            ).all()
+            for row in org_role_rows:
+                org_app_roles_by_user.setdefault(row.user_id, {})[row.app_name] = list(row.roles or [])
+
+        group_map: Dict[str, List[Dict[str, Any]]] = {}
+        if include_groups and platform_user_ids:
+            group_rows = db.query(
+                OrganizationGroupMembership.user_id,
+                OrganizationGroup.id,
+                OrganizationGroup.name,
+                OrganizationGroup.display_name,
+                OrganizationGroup.source_type,
+            ).join(
+                OrganizationGroup,
+                OrganizationGroup.id == OrganizationGroupMembership.organization_group_id
+            ).filter(
+                OrganizationGroup.organization_id == organization_id,
+                OrganizationGroupMembership.user_id.in_(platform_user_ids)
+            ).all()
+            for user_id, group_id, name, display_name, source_type in group_rows:
+                group_map.setdefault(user_id, []).append({
+                    "id": group_id,
+                    "name": name,
+                    "display_name": display_name,
+                    "source_type": source_type,
+                })
+
+        def resolve_avatar(user_id: str, fallback_avatar_url: Optional[str]) -> Optional[str]:
+            profile = db.query(OrganizationUserProfile).filter(
+                OrganizationUserProfile.organization_id == organization_id,
+                OrganizationUserProfile.user_id == user_id,
+            ).first()
+            return profile.avatar_url if profile and profile.avatar_url else fallback_avatar_url
+
+        def build_effective_app_roles(user_id: str) -> Dict[str, List[str]]:
+            base_roles = dict(tenant_app_roles_by_user.get(user_id, {}))
+            if include_roles:
+                for app_name, role_list in org_app_roles_by_user.get(user_id, {}).items():
+                    base_roles[app_name] = list(role_list or [])
+            return base_roles
+
+        users: List[Dict[str, Any]] = []
+        for user in platform_users:
+            tenant_link = tenant_link_by_user.get(user.id)
+            last_active_at = user.last_login or (tenant_link.last_accessed_at if tenant_link else None)
+            users.append({
+                "id": user.id,
+                "keycloak_id": user.keycloak_id,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "full_name": f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email,
+                "avatar_url": resolve_avatar(user.id, user.avatar_url),
+                "source": "platform",
+                "status": "active",
+                "enabled": user.status == UserStatus.ACTIVE,
+                "app_roles": build_effective_app_roles(user.id),
+                "groups": group_map.get(user.id, []) if include_groups else [],
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "last_login": user.last_login.isoformat() if user.last_login else None,
+                "last_active": last_active_at.isoformat() if last_active_at else None,
+            })
+
+        if include_directory:
+            directory_users = db.query(DirectoryUser).filter(
+                DirectoryUser.organization_id == organization_id,
+                DirectoryUser.tenant_id == org.tenant_id
+            ).all()
+            for dir_user in directory_users:
+                existing_platform_user = next(
+                    (u for u in users if u["email"].lower() == (dir_user.email or "").lower()),
+                    None,
+                )
+                if existing_platform_user:
+                    continue
+                platform_user = db.query(User).filter(User.email.ilike(dir_user.email)).first()
+                app_roles = build_effective_app_roles(platform_user.id) if platform_user else {}
+                groups = group_map.get(platform_user.id, []) if include_groups and platform_user else []
+                users.append({
+                    "id": dir_user.id,
+                    "keycloak_id": platform_user.keycloak_id if platform_user else None,
+                    "email": dir_user.email,
+                    "first_name": dir_user.first_name,
+                    "last_name": dir_user.last_name,
+                    "full_name": dir_user.display_name or f"{dir_user.first_name or ''} {dir_user.last_name or ''}".strip() or dir_user.email,
+                    "avatar_url": resolve_avatar(platform_user.id, platform_user.avatar_url) if platform_user else None,
+                    "source": "directory",
+                    "provider": dir_user.provider_type,
+                    "status": "synced" if app_roles else "directory_only",
+                    "enabled": bool(dir_user.enabled),
+                    "app_roles": app_roles,
+                    "groups": groups,
+                    "created_at": dir_user.created_at.isoformat() if dir_user.created_at else None,
+                    "last_login": platform_user.last_login.isoformat() if platform_user and platform_user.last_login else None,
+                    "last_active": (
+                        platform_user.last_login.isoformat()
+                        if platform_user and platform_user.last_login
+                        else (dir_user.last_synced_at.isoformat() if dir_user.last_synced_at else None)
+                    ),
+                })
+
+        return {
+            "users": users,
+            "count": len(users),
+            "organization_id": organization_id,
+            "platform_count": len([u for u in users if u.get("source") == "platform"]),
+            "directory_count": len([u for u in users if u.get("source") == "directory"]),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get organization users: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get organization users: {str(e)}")

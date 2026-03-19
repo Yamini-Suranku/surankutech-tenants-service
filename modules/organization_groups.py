@@ -19,12 +19,15 @@ from models import (
     OrganizationGroup,
     OrganizationGroupMembership,
     Organization,
+    OrganizationUserRole,
     DirectoryUser,
     DirectoryGroup,
     DirectoryGroupMembership,
     TenantLDAPConfig,
 )
 from modules.organization_roles import reconcile_organization_user_roles
+from modules.tenant_management import user_has_tenant_admin
+from shared.models import UserTenant
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/platform/organizations", tags=["organization-groups"])
@@ -137,9 +140,38 @@ async def get_organization_group_memberships(
 
 def _require_org_admin_access(db: Session, user_id: str, org: Organization):
     """Check if user has admin access to the organization."""
-    # This should match the logic from organization_azure_ad.py
-    # For now, we'll implement basic checks
-    pass  # TODO: Implement proper admin access check
+    if not org:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+
+    user = db.query(User).filter(
+        or_(User.id == user_id, User.keycloak_id == user_id)
+    ).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    membership = db.query(UserTenant).filter(
+        UserTenant.user_id == user.id,
+        UserTenant.tenant_id == org.tenant_id,
+        UserTenant.status == "active",
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied to tenant")
+
+    if user_has_tenant_admin(membership):
+        return user
+
+    role_entries = db.query(OrganizationUserRole).filter(
+        OrganizationUserRole.organization_id == org.id,
+        OrganizationUserRole.user_id == user.id,
+    ).all()
+    for entry in role_entries:
+        if any(role in {"admin", "administrator"} for role in (entry.roles or [])):
+            return user
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Organization admin access required",
+    )
 
 
 @router.get("/{organization_id}/groups")
