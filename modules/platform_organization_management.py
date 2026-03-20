@@ -11,7 +11,7 @@ from datetime import datetime
 import uuid
 
 from shared.database import get_db
-from shared.auth import get_current_user
+from shared.auth import TokenData, get_current_user
 from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
 from models import (
     DirectoryUser,
@@ -72,6 +72,37 @@ APP_CATALOG = {
 }
 
 DEFAULT_DNS_ZONE = "suranku.net"
+
+
+def _current_user_id(current_user: Any) -> Optional[str]:
+    if isinstance(current_user, dict):
+        return current_user.get("id") or current_user.get("user_id") or current_user.get("sub")
+    return getattr(current_user, "user_id", None) or getattr(current_user, "sub", None)
+
+
+
+def _token_has_org_membership(current_user: Any, organization: Organization) -> bool:
+    current_org = getattr(current_user, "current_org", None) or {}
+    if isinstance(current_org, dict):
+        current_org_id = current_org.get("org_id") or current_org.get("id")
+        current_org_slug = current_org.get("org_slug") or current_org.get("slug")
+        if str(current_org_id or "") == str(organization.id):
+            return True
+        if current_org_slug and str(current_org_slug) == str(organization.slug):
+            return True
+
+    memberships = getattr(current_user, "org_memberships", None) or []
+    if isinstance(memberships, list):
+        for membership in memberships:
+            if not isinstance(membership, dict):
+                continue
+            membership_org_id = membership.get("org_id") or membership.get("id")
+            membership_org_slug = membership.get("org_slug") or membership.get("slug") or membership.get("org_name")
+            if str(membership_org_id or "") == str(organization.id):
+                return True
+            if membership_org_slug and str(membership_org_slug) == str(organization.slug):
+                return True
+    return False
 
 def _get_or_create_user_tenant(db: Session, user: User, tenant_name: str = None) -> Tenant:
     """Get user's existing tenant or create new one for their company/workspace"""
@@ -150,12 +181,12 @@ async def get_available_apps():
 async def create_organization(
     request: OrganizationCreateRequest,
     db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: TokenData = Depends(get_current_user)
 ):
     """Create a new organization for a platform user"""
     try:
         # Get user from database
-        user = db.query(User).filter(User.id == current_user["id"]).first()
+        user = db.query(User).filter(User.id == _current_user_id(current_user)).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -302,12 +333,12 @@ async def create_organization(
 @router.get("/", response_model=OrganizationListResponse)
 async def list_user_organizations(
     db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: TokenData = Depends(get_current_user)
 ):
     """List organizations where the user has access"""
     try:
         # Get user from database
-        user = db.query(User).filter(User.id == current_user["id"]).first()
+        user = db.query(User).filter(User.id == _current_user_id(current_user)).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
@@ -362,14 +393,14 @@ async def list_user_organizations(
 async def get_organization(
     organization_id: str,
     db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: TokenData = Depends(get_current_user)
 ):
     """Get organization details if user has access"""
     try:
         # Check if user has access to this organization
         user_role = db.query(OrganizationUserRole).filter(
             OrganizationUserRole.organization_id == organization_id,
-            OrganizationUserRole.user_id == current_user["id"]
+            OrganizationUserRole.user_id == _current_user_id(current_user)
         ).first()
 
         if not user_role:
@@ -411,7 +442,7 @@ async def get_organization(
             updated_at=org.updated_at,
             tenant_name=tenant.name,
             apps_enabled=[app.app_name for app in enabled_apps],
-            is_creator=org.created_by == current_user["id"]
+            is_creator=org.created_by == _current_user_id(current_user)
         )
 
     except HTTPException:
@@ -428,7 +459,7 @@ async def get_organization_users(
     include_groups: bool = True,
     include_roles: bool = True,
     db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: TokenData = Depends(get_current_user)
 ):
     """Get organization users through an org-scoped API."""
     try:
@@ -439,19 +470,28 @@ async def get_organization_users(
         if not org:
             raise HTTPException(status_code=404, detail="Organization not found")
 
+        current_user_id = _current_user_id(current_user)
         tenant_membership = db.query(UserTenant).filter(
-            UserTenant.user_id == current_user["id"],
+            UserTenant.user_id == current_user_id,
             UserTenant.tenant_id == org.tenant_id,
             UserTenant.status == "active",
         ).first()
-        if not tenant_membership:
-            raise HTTPException(status_code=403, detail="Access denied to tenant")
 
         user_role = db.query(OrganizationUserRole).filter(
             OrganizationUserRole.organization_id == organization_id,
-            OrganizationUserRole.user_id == current_user["id"]
+            OrganizationUserRole.user_id == current_user_id
         ).first()
-        if not (user_has_tenant_admin(tenant_membership) or user_role):
+        user_group_membership = db.query(OrganizationGroupMembership).join(
+            OrganizationGroup,
+            OrganizationGroup.id == OrganizationGroupMembership.organization_group_id,
+        ).filter(
+            OrganizationGroup.organization_id == organization_id,
+            OrganizationGroupMembership.user_id == current_user_id,
+        ).first()
+        has_org_access = bool(user_role or user_group_membership)
+        has_token_membership = _token_has_org_membership(current_user, org)
+        is_tenant_admin = bool(tenant_membership and user_has_tenant_admin(tenant_membership))
+        if not (is_tenant_admin or has_org_access or has_token_membership):
             raise HTTPException(status_code=403, detail="Access denied to this organization")
 
         org_role_user_ids = {
@@ -493,13 +533,33 @@ async def get_organization_users(
             tenant_link_by_user[row.user_id] = row
 
         org_app_roles_by_user: Dict[str, Dict[str, List[str]]] = {}
+        direct_org_roles_by_user: Dict[str, Dict[str, List[str]]] = {}
+        group_org_roles_by_user: Dict[str, Dict[str, List[str]]] = {}
+        role_sources_by_user: Dict[str, Dict[str, str]] = {}
         if platform_user_ids and include_roles:
             org_role_rows = db.query(OrganizationUserRole).filter(
                 OrganizationUserRole.organization_id == organization_id,
                 OrganizationUserRole.user_id.in_(platform_user_ids)
             ).all()
             for row in org_role_rows:
-                org_app_roles_by_user.setdefault(row.user_id, {})[row.app_name] = list(row.roles or [])
+                effective_roles = list(row.roles or [])
+                org_app_roles_by_user.setdefault(row.user_id, {})[row.app_name] = effective_roles
+                metadata = row.metadata_json or {}
+                group_roles = [str(role) for role in (metadata.get("group_roles") or []) if isinstance(role, str)]
+                direct_roles = sorted(set(effective_roles) - set(group_roles))
+                if direct_roles:
+                    direct_org_roles_by_user.setdefault(row.user_id, {})[row.app_name] = direct_roles
+                if group_roles:
+                    group_org_roles_by_user.setdefault(row.user_id, {})[row.app_name] = group_roles
+                if direct_roles and group_roles:
+                    source = "merged"
+                elif direct_roles:
+                    source = "direct"
+                elif group_roles:
+                    source = "group_derived"
+                else:
+                    source = "none"
+                role_sources_by_user.setdefault(row.user_id, {})[row.app_name] = source
 
         group_map: Dict[str, List[Dict[str, Any]]] = {}
         if include_groups and platform_user_ids:
@@ -538,6 +598,15 @@ async def get_organization_users(
                     base_roles[app_name] = list(role_list or [])
             return base_roles
 
+        def build_direct_app_roles(user_id: str) -> Dict[str, List[str]]:
+            return dict(direct_org_roles_by_user.get(user_id, {})) if include_roles else {}
+
+        def build_group_derived_app_roles(user_id: str) -> Dict[str, List[str]]:
+            return dict(group_org_roles_by_user.get(user_id, {})) if include_roles else {}
+
+        def build_role_sources(user_id: str) -> Dict[str, str]:
+            return dict(role_sources_by_user.get(user_id, {})) if include_roles else {}
+
         users: List[Dict[str, Any]] = []
         for user in platform_users:
             tenant_link = tenant_link_by_user.get(user.id)
@@ -554,6 +623,9 @@ async def get_organization_users(
                 "status": "active",
                 "enabled": user.status == UserStatus.ACTIVE,
                 "app_roles": build_effective_app_roles(user.id),
+                "direct_app_roles": build_direct_app_roles(user.id),
+                "group_derived_app_roles": build_group_derived_app_roles(user.id),
+                "role_sources": build_role_sources(user.id),
                 "groups": group_map.get(user.id, []) if include_groups else [],
                 "created_at": user.created_at.isoformat() if user.created_at else None,
                 "last_login": user.last_login.isoformat() if user.last_login else None,
@@ -588,6 +660,9 @@ async def get_organization_users(
                     "status": "synced" if app_roles else "directory_only",
                     "enabled": bool(dir_user.enabled),
                     "app_roles": app_roles,
+                    "direct_app_roles": build_direct_app_roles(platform_user.id) if platform_user else {},
+                    "group_derived_app_roles": build_group_derived_app_roles(platform_user.id) if platform_user else {},
+                    "role_sources": build_role_sources(platform_user.id) if platform_user else {},
                     "groups": groups,
                     "created_at": dir_user.created_at.isoformat() if dir_user.created_at else None,
                     "last_login": platform_user.last_login.isoformat() if platform_user and platform_user.last_login else None,

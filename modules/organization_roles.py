@@ -39,6 +39,9 @@ class OrgUserRolePayload(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     app_roles: Dict[str, List[str]] = Field(default_factory=dict)
+    direct_app_roles: Dict[str, List[str]] = Field(default_factory=dict)
+    group_derived_app_roles: Dict[str, List[str]] = Field(default_factory=dict)
+    role_sources: Dict[str, str] = Field(default_factory=dict)
     birthright_admin: bool = False
     membership_source: str = Field(default="manual")
     directory_synced: bool = False
@@ -322,6 +325,16 @@ async def list_org_roles(
         direct_roles = role_map.get(user.id, {})
         group_roles = group_role_map.get(user.id, {})
         entry_roles = _merge_app_roles(direct_roles, group_roles)
+        role_sources: Dict[str, str] = {}
+        for app_name in sorted(set(direct_roles.keys()) | set(group_roles.keys())):
+            has_direct = bool(direct_roles.get(app_name))
+            has_group = bool(group_roles.get(app_name))
+            if has_direct and has_group:
+                role_sources[app_name] = "merged"
+            elif has_direct:
+                role_sources[app_name] = "direct"
+            elif has_group:
+                role_sources[app_name] = "group_derived"
         meta = user_meta.get(user.id, {
             "directory_synced": False,
             "membership_source": "manual",
@@ -336,6 +349,9 @@ async def list_org_roles(
                 first_name=user.first_name,
                 last_name= user.last_name,
                 app_roles=entry_roles,
+                direct_app_roles=direct_roles,
+                group_derived_app_roles=group_roles,
+                role_sources=role_sources,
                 birthright_admin=_user_has_tenant_admin_access(user_tenant),
                 membership_source=meta.get("membership_source") or "manual",
                 directory_synced=bool(meta.get("directory_synced")),

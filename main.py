@@ -156,7 +156,8 @@ app.include_router(ldap_router)             # /tenants/{id}/ldap/* (LDAP/AD sync
 app.include_router(darkhole_proxy_router)   # /tenants/{id}/orgs/{id}/apps/darkhole/*
 app.include_router(org_access_router)       # /api/access/* (organization access control)
 app.include_router(org_azure_ad_router)     # /api/platform/organizations/{id}/azure-ad/* (org Azure AD integration)
-app.include_router(org_groups_router)       # /api/platform/organizations/{id}/groups/* (manual groups management)
+app.include_router(org_groups_router)       # /platform/organizations/{id}/groups/* (legacy manual groups management path)
+app.include_router(org_groups_router, prefix="/api")       # /api/platform/organizations/{id}/groups/* (external org-scoped groups path)
 app.include_router(directory_sync_router)   # /api/platform/organizations/{id}/sync-directory-to-platform (directory to platform sync)
 app.include_router(token_enhancement_router) # /api/token-enhancement/* (JWT token enhancement for Keycloak)
 app.include_router(audit_events_router)      # /api/audit/* (centralized audit ingestion)
