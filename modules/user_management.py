@@ -845,8 +845,6 @@ async def resend_invitation(
         if not user_tenant:
             raise HTTPException(status_code=403, detail="Access denied to tenant")
 
-        login_url = _build_login_url(invitation)
-
         # Check if invitation is still valid
         if invitation.status != "pending":
             raise HTTPException(
@@ -854,9 +852,7 @@ async def resend_invitation(
                 detail=f"Cannot resend invitation with status: {invitation.status}"
             )
 
-        # Check if invitation has expired
-        if invitation.expires_at and datetime.utcnow() > invitation.expires_at:
-            raise HTTPException(status_code=400, detail="Invitation has expired")
+        was_expired = bool(invitation.expires_at and datetime.utcnow() > invitation.expires_at)
 
         # Allow updating organization context when resending
         target_org = None
@@ -887,8 +883,9 @@ async def resend_invitation(
         # Update invitation with resend info
         invitation.resent_count = (invitation.resent_count or 0) + 1
         invitation.last_sent_at = datetime.utcnow()
+        invitation.updated_at = datetime.utcnow()
 
-        # Extend expiry by 7 more days
+        # Resend should renew pending invitations, including ones that have expired.
         invitation.expires_at = datetime.utcnow() + timedelta(days=7)
 
         db.commit()
@@ -916,10 +913,15 @@ async def resend_invitation(
 
         return {
             "status": "success",
-            "message": f"Invitation resent to {invitation.email}",
+            "message": (
+                f"Expired invitation renewed and resent to {invitation.email}"
+                if was_expired
+                else f"Invitation resent to {invitation.email}"
+            ),
             "invitation_id": invitation.id,
             "resent_count": invitation.resent_count,
-            "new_expiry": invitation.expires_at.isoformat()
+            "new_expiry": invitation.expires_at.isoformat(),
+            "was_expired": was_expired,
         }
 
     except HTTPException:
