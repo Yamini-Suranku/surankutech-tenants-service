@@ -781,7 +781,7 @@ async def get_directory_to_platform_status(
         pending_group_sync = max(0, directory_group_count - synced_platform_groups)
 
         return {
-            "organization_id": organization_id,
+            "org_id": organization_id,
             "users": {
                 "directory_count": directory_user_count,
                 "synced_platform_count": synced_platform_users,

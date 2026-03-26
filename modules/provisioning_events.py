@@ -52,7 +52,7 @@ async def emit_app_enabled_event(
         "tenant_domain": tenant_domain,
         "plan_id": plan_id,
         "app_name": app_name,
-        "organization_id": org_id,
+        "org_id": org_id,
         "organization_hostname": org_hostname,
         "organization_dns_subdomain": org_dns_subdomain,
         "organization_dns_zone": org_dns_zone,
@@ -86,7 +86,7 @@ async def emit_app_disabled_event(
     payload = {
         "tenant_id": tenant_id,
         "app_name": app_name,
-        "organization_id": org_id,
+        "org_id": org_id,
         "organization_hostname": org_hostname,
         "organization_dns_subdomain": org_dns_subdomain,
         "organization_dns_zone": org_dns_zone,

@@ -676,7 +676,7 @@ async def get_organization_users(
         return {
             "users": users,
             "count": len(users),
-            "organization_id": organization_id,
+            "org_id": organization_id,
             "platform_count": len([u for u in users if u.get("source") == "platform"]),
             "directory_count": len([u for u in users if u.get("source") == "directory"]),
         }

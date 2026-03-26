@@ -142,7 +142,7 @@ async def upload_user_avatar(
                         "avatar_url": avatar_url,
                         "filename": file.filename,
                         "scope": upload_scope,
-                        "organization_id": org_id if upload_scope == "organization_user" else None,
+                        "org_id": org_id if upload_scope == "organization_user" else None,
                     }
                 )
                 db.add(audit_log)
@@ -153,7 +153,7 @@ async def upload_user_avatar(
                 "message": "Avatar uploaded successfully",
                 "avatar_url": avatar_url,
                 "scope": upload_scope,
-                "organization_id": org_id if upload_scope == "organization_user" else None,
+                "org_id": org_id if upload_scope == "organization_user" else None,
             }
 
         except Exception as storage_error:
@@ -227,7 +227,7 @@ async def upload_organization_user_avatar(
             resource_id=profile.id,
             user_id=current_user.id,
             tenant_id=tenant_id,
-            details={"avatar_url": avatar_url, "filename": file.filename, "organization_id": org.id, "target_user_id": user.id},
+            details={"avatar_url": avatar_url, "filename": file.filename, "org_id": org.id, "target_user_id": user.id},
         ))
         db.commit()
 
@@ -236,7 +236,7 @@ async def upload_organization_user_avatar(
             "message": "Avatar uploaded successfully",
             "avatar_url": avatar_url,
             "scope": "organization_user",
-            "organization_id": org.id,
+            "org_id": org.id,
         }
     except HTTPException:
         raise

@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Text, Boolean, DateTime, Integer, JSON, ForeignKey, Index, UniqueConstraint
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, synonym
 from datetime import datetime
 import uuid
 import sys
@@ -17,6 +17,7 @@ class Invitation(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True)
+    org_id = synonym("organization_id")
     organization_hostname = Column(String(255), nullable=True)
     email = Column(String(255), nullable=False, index=True)
     app_roles = Column(JSON, nullable=False)
@@ -238,6 +239,7 @@ class OrganizationAppAccess(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    org_id = synonym("organization_id")
     app_name = Column(String(50), nullable=False, index=True)
 
     is_enabled = Column(Boolean, default=False, index=True)
@@ -267,6 +269,7 @@ class OrganizationUserRole(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    org_id = synonym("organization_id")
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     app_name = Column(String(50), nullable=False, index=True)
     roles = Column(JSON, default=list)
@@ -292,6 +295,7 @@ class OrganizationUserProfile(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    org_id = synonym("organization_id")
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     avatar_url = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
@@ -402,6 +406,7 @@ class TenantLDAPConfig(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    org_id = synonym("organization_id")
     enabled = Column(Boolean, default=False, index=True)
     provider_type = Column(String(50), default='ldap', nullable=False, index=True)
 
@@ -486,6 +491,7 @@ class TenantLDAPSyncHistory(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    org_id = synonym("organization_id")
     ldap_config_id = Column(String(36), ForeignKey("tenant_ldap_configs.id", ondelete="CASCADE"), nullable=False, index=True)
 
     # Sync metadata
@@ -534,6 +540,7 @@ class DirectoryUser(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    org_id = synonym("organization_id")
     ldap_config_id = Column(String(36), ForeignKey("tenant_ldap_configs.id", ondelete="CASCADE"), nullable=False, index=True)
 
     # Directory identifiers
@@ -575,6 +582,7 @@ class DirectoryGroup(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    org_id = synonym("organization_id")
     ldap_config_id = Column(String(36), ForeignKey("tenant_ldap_configs.id", ondelete="CASCADE"), nullable=False, index=True)
 
     # Directory identifiers
@@ -638,6 +646,7 @@ class OrganizationGroup(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id = Column(String(36), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     organization_id = Column(String(36), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    org_id = synonym("organization_id")
 
     # Group information
     name = Column(String(255), nullable=False, index=True)

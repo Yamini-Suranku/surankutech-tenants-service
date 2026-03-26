@@ -551,8 +551,8 @@ async def get_user_org_roles_for_keycloak(
 
         return {
             "app_roles": app_roles,
-            "organization_id": organization.id,
-            "organization_name": organization.name,
+            "org_id": organization.id,
+            "org_name": organization.name,
             "dns_subdomain": org_subdomain
         }
 
@@ -579,6 +579,6 @@ async def reconcile_org_roles_endpoint(
     return {
         "status": "ok",
         "tenant_id": tenant_id,
-        "organization_id": org_id,
+        "org_id": org_id,
         **result,
     }

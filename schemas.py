@@ -155,7 +155,7 @@ class UserInviteRequest(BaseModel):
     email: EmailStr
     app_roles: Dict[str, List[str]] = Field(..., description="App-specific roles")
     message: Optional[str] = Field(None, max_length=500)
-    organization_id: Optional[str] = Field(None, description="Target organization for this invitation")
+    organization_id: Optional[str] = Field(None, alias="org_id", description="Target organization for this invitation")
     organization_hostname: Optional[str] = Field(None, description="DNS hostname for the organization invitation link")
 
     @validator('app_roles')
@@ -179,6 +179,9 @@ class UserInviteRequest(BaseModel):
                 if role not in valid_roles:
                     raise ValueError(f"Invalid role: {role}")
         return v
+
+    class Config:
+        allow_population_by_field_name = True
 
 class UserUpdateRequest(BaseModel):
     first_name: Optional[str] = Field(None, min_length=1, max_length=50)
@@ -211,11 +214,12 @@ class InvitationResponse(BaseModel):
     invited_by: str
     resent_count: int
     last_sent_at: datetime
-    organization_id: Optional[str] = None
+    organization_id: Optional[str] = Field(None, alias="org_id")
     organization_hostname: Optional[str] = None
 
     class Config:
         from_attributes = True
+        allow_population_by_field_name = True
 
 class InvitationAcceptRequest(BaseModel):
     invitation_token: str = Field("", description="Legacy field, not required")
@@ -225,8 +229,11 @@ class InvitationAcceptRequest(BaseModel):
 
 class InvitationResendRequest(BaseModel):
     message: Optional[str] = Field(None, max_length=500)
-    organization_id: Optional[str] = Field(None, description="Target organization for this resend")
+    organization_id: Optional[str] = Field(None, alias="org_id", description="Target organization for this resend")
     organization_hostname: Optional[str] = Field(None, description="DNS hostname override for invitation link")
+
+    class Config:
+        allow_population_by_field_name = True
 
 # ===== AUTH SCHEMAS =====
 
@@ -438,7 +445,7 @@ class DomainVerificationResponse(BaseModel):
 
 class AuditLogResponse(BaseModel):
     id: str
-    organization_id: Optional[str] = None
+    organization_id: Optional[str] = Field(None, alias="org_id")
     action: str
     resource_type: str
     resource_id: str
@@ -450,17 +457,21 @@ class AuditLogResponse(BaseModel):
     created_at: datetime
 
     class Config:
+        allow_population_by_field_name = True
         from_attributes = True
 
 class AuditLogSearchRequest(BaseModel):
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
-    organization_id: Optional[str] = None
+    organization_id: Optional[str] = Field(None, alias="org_id")
     action: Optional[str] = None
     resource_type: Optional[str] = None
     user_id: Optional[str] = None
     limit: Optional[int] = Field(50, ge=1, le=100)
     offset: Optional[int] = Field(0, ge=0)
+
+    class Config:
+        allow_population_by_field_name = True
 
 # ===== WEBHOOK SCHEMAS =====
 
@@ -515,7 +526,7 @@ def normalize_directory_provider(value: Optional[str]) -> str:
 class LDAPConfigCreateRequest(BaseModel):
     """Request schema for creating LDAP configuration"""
     organization_id: Optional[str] = Field(
-        None, description="Optional organization scope (per-org directory configuration)"
+        None, alias="org_id", description="Optional organization scope (per-org directory configuration)"
     )
     provider_type: Optional[str] = Field("ldap", description="Directory provider type (ldap or entra_graph)")
 
@@ -594,10 +605,13 @@ class LDAPConfigCreateRequest(BaseModel):
                     raise ValueError(f"{label} is required for Azure Entra ID")
         return values
 
+    class Config:
+        allow_population_by_field_name = True
+
 class LDAPConfigUpdateRequest(BaseModel):
     """Request schema for updating LDAP configuration"""
     organization_id: Optional[str] = Field(
-        None, description="Organization scope for this configuration (use query param when updating existing configs)"
+        None, alias="org_id", description="Organization scope for this configuration (use query param when updating existing configs)"
     )
     provider_type: Optional[str] = Field(None, description="Directory provider type (ldap or entra_graph)")
     connection_url: Optional[str] = Field(None, max_length=500)
@@ -645,11 +659,14 @@ class LDAPConfigUpdateRequest(BaseModel):
             return value
         return normalize_directory_provider(value)
 
+    class Config:
+        allow_population_by_field_name = True
+
 class LDAPConfigResponse(BaseModel):
     """Response schema for LDAP configuration (credentials stored in Vault, not returned)"""
     id: str
     tenant_id: str
-    organization_id: Optional[str]
+    organization_id: Optional[str] = Field(None, alias="org_id")
     enabled: bool
     provider_type: str
 
@@ -714,6 +731,7 @@ class LDAPConfigResponse(BaseModel):
     created_by: Optional[str]
 
     class Config:
+        allow_population_by_field_name = True
         from_attributes = True
 
 class LDAPTestConnectionRequest(BaseModel):
@@ -779,7 +797,7 @@ class LDAPSyncHistoryResponse(BaseModel):
     """LDAP sync history entry"""
     id: str
     tenant_id: str
-    organization_id: Optional[str]
+    organization_id: Optional[str] = Field(None, alias="org_id")
     ldap_config_id: str
     sync_type: str
     sync_status: str
@@ -798,6 +816,7 @@ class LDAPSyncHistoryResponse(BaseModel):
     created_at: datetime
 
     class Config:
+        allow_population_by_field_name = True
         from_attributes = True
 
 class LDAPSyncHistoryListResponse(BaseModel):
