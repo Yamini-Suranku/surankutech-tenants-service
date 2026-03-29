@@ -15,5 +15,47 @@ namespace: tenant-services
 
 # Imagest
 images:
-- name: surankutech-tenants-service
-  newTag: v0.15
+- name: surankutech/tenants-service
+  newTag: v0.6.82
+
+patches:
+- patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: "512Mi"
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/cpu
+      value: "250m"
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/limits/memory
+      value: "1Gi"
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/limits/cpu
+      value: "750m"
+    - op: replace
+      path: /spec/template/spec/containers/0/livenessProbe/initialDelaySeconds
+      value: 90
+    - op: replace
+      path: /spec/template/spec/containers/0/livenessProbe/periodSeconds
+      value: 30
+    - op: replace
+      path: /spec/template/spec/containers/0/livenessProbe/timeoutSeconds
+      value: 10
+    - op: replace
+      path: /spec/template/spec/containers/0/livenessProbe/failureThreshold
+      value: 5
+    - op: replace
+      path: /spec/template/spec/containers/0/readinessProbe/initialDelaySeconds
+      value: 20
+    - op: replace
+      path: /spec/template/spec/containers/0/readinessProbe/periodSeconds
+      value: 10
+    - op: replace
+      path: /spec/template/spec/containers/0/readinessProbe/timeoutSeconds
+      value: 10
+    - op: replace
+      path: /spec/template/spec/containers/0/readinessProbe/failureThreshold
+      value: 6
+  target:
+    kind: Deployment
+    name: tenants-service
