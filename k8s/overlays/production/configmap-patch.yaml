@@ -5,7 +5,7 @@ metadata:
 data:
   environment: "production"
   keycloak-url: "https://id.suranku.com"
-  keycloak-public-url: "https://keycloak.suranku.com"
+  keycloak-public-url: "https://id.suranku.com"
   platform-frontend-url: "https://platform.suranku.com"
   # Production-specific Application Base URL for email links (AWS format)
   app-base-url: "https://tenants.suranku.com"

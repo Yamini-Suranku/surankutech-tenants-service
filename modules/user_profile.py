@@ -181,17 +181,18 @@ async def change_password(
         raise HTTPException(status_code=400, detail="Cannot change password for this account type")
 
     try:
-        # Use Keycloak client to change password
         keycloak_client = KeycloakClient()
+        # Verify the current password against Keycloak before attempting a reset.
+        try:
+            await keycloak_client.authenticate_user(user.email, request.current_password)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
 
-        # TODO: Implement password verification and update methods in KeycloakClient
-        # For now, we'll assume the current password is correct and just attempt to update
-        logger.info(f"Password change requested for user {user.email} - Keycloak integration pending")
+        password_updated = await keycloak_client.update_user_password(user.keycloak_id, request.new_password)
+        if not password_updated:
+            raise HTTPException(status_code=500, detail="Failed to update password in authentication system")
 
-        # Placeholder for Keycloak password update
-        # await keycloak_client.update_user_password(user.keycloak_id, request.new_password)
-
-        logger.info(f"Password changed for user {user.email}")
+        logger.info(f"Password changed for user {user.email} in Keycloak")
         return {"message": "Password changed successfully"}
 
     except HTTPException:

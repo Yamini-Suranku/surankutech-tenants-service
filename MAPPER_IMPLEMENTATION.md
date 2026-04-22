@@ -200,7 +200,7 @@ python3 scripts/setup_unified_org_mappers.py
 
 ### Requirements
 
-1. Keycloak instance running at `keycloak.local.suranku`
+1. Keycloak instance running at `id.local.suranku`
 2. Valid admin credentials in environment variables
 3. `suranku-platform` realm exists
 4. Tenant service running for token enhancement API

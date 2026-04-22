@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from shared.database import get_db
 from shared.auth import TokenData, get_current_token_data
 from shared.models import UserTenant
-from modules.tenant_management import get_or_create_user_from_token
+from modules.tenant_management import get_or_create_user_from_token, user_has_tenant_admin
 from modules.organization_management import DEFAULT_DNS_ZONE
 from models import Organization, Tenant, OrganizationUserRole
 
@@ -188,7 +188,10 @@ def _validate_access(
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    has_tenant_admin = _has_darkhole_admin(user_tenant)
+    # Treat tenant-level admins as org admins for platform-mediated DarkHole management.
+    # The platform org-admin page loads DarkHole roles alongside other org data; if this
+    # endpoint rejects a valid tenant admin, the whole page load is aborted.
+    has_tenant_admin = _has_darkhole_admin(user_tenant) or user_has_tenant_admin(user_tenant)
     has_org_admin = False
     if require_admin and not has_tenant_admin:
         has_org_admin = _user_has_org_darkhole_admin(db, org_id, user.id)

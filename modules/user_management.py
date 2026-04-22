@@ -67,6 +67,27 @@ def _derive_org_hostname(org: Organization) -> Optional[str]:
         return _to_public_org_hostname(f"{org.slug}.{zone}")
     return None
 
+
+def _resolve_org_by_hostname(db: Session, tenant_id: str, hostname: Optional[str]) -> Optional[Organization]:
+    host = _to_public_org_hostname(hostname)
+    if not host:
+        return None
+    short_name = host.split(".", 1)[0].strip().lower()
+    candidates = db.query(Organization).filter(
+        Organization.tenant_id == tenant_id,
+        Organization.deleted_at.is_(None)
+    ).all()
+    for org in candidates:
+        public_host = _derive_org_hostname(org)
+        if public_host and public_host.lower() == host.lower():
+            return org
+        if short_name and short_name in {
+            str(org.slug or "").lower(),
+            str(org.dns_subdomain or "").lower(),
+        }:
+            return org
+    return None
+
 def _normalize_invite_app_roles(app_roles: Optional[dict]) -> dict:
     """Drop apps with empty/invalid role lists and de-duplicate role values."""
     normalized = {}
@@ -268,8 +289,12 @@ async def invite_user(
         if not org_hostname:
             org_hostname = _derive_org_hostname(target_org)
     elif org_hostname:
-        # Host provided without org ID; accept but log
-        logger.info("Invitation includes hostname without organization_id: %s", org_hostname)
+        target_org = _resolve_org_by_hostname(db, tenant_id, org_hostname)
+        if target_org:
+            logger.info("Resolved invitation hostname %s to organization %s", org_hostname, target_org.id)
+            org_hostname = _derive_org_hostname(target_org) or org_hostname
+        else:
+            logger.info("Invitation includes hostname without matching organization_id: %s", org_hostname)
 
     invite_app_roles = _normalize_invite_app_roles(request.app_roles)
     if not invite_app_roles:

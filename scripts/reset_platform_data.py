@@ -162,7 +162,7 @@ class PlatformReset:
 
         try:
             # Use working Keycloak configuration (newer version without /auth)
-            base_url = os.getenv("KEYCLOAK_BASE_URL", "https://keycloak.local.suranku")
+            base_url = os.getenv("KEYCLOAK_BASE_URL", "https://id.local.suranku")
             realm = "suranku-platform"
             admin_username = os.getenv("KEYCLOAK_ADMIN_USERNAME", "admin")
             admin_password = os.getenv("KEYCLOAK_ADMIN_PASSWORD", "admin")

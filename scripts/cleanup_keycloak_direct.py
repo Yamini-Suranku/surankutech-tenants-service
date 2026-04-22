@@ -16,7 +16,7 @@ async def cleanup_keycloak_users():
     """Clean up Keycloak users directly"""
 
     # Configuration for newer Keycloak (no /auth prefix)
-    base_url = "http://keycloak.local.suranku"
+    base_url = "http://id.local.suranku"
     realm = "suranku-platform"
     admin_username = os.getenv("KEYCLOAK_ADMIN_USERNAME", "admin")
     admin_password = os.getenv("KEYCLOAK_ADMIN_PASSWORD", "admin")  # Default for local dev

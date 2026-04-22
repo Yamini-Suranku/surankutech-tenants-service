@@ -158,6 +158,14 @@ class UserInviteRequest(BaseModel):
     organization_id: Optional[str] = Field(None, alias="org_id", description="Target organization for this invitation")
     organization_hostname: Optional[str] = Field(None, description="DNS hostname for the organization invitation link")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_organization_aliases(cls, data):
+        if isinstance(data, dict) and data.get("organization_id") and not data.get("org_id"):
+            data = dict(data)
+            data["org_id"] = data["organization_id"]
+        return data
+
     @validator('app_roles')
     def validate_app_roles(cls, v):
         valid_apps = ["darkhole", "darkfolio", "confiploy"]
