@@ -27,6 +27,18 @@ class VerificationRequest(BaseModel):
 class ResendVerificationRequest(BaseModel):
     email: EmailStr
 
+
+def _verification_login_url() -> str:
+    explicit_url = str(os.getenv("PLATFORM_LOGIN_URL", "") or "").strip()
+    if explicit_url:
+        return explicit_url
+
+    keycloak_public_url = str(os.getenv("KEYCLOAK_PUBLIC_URL", "") or "").strip().rstrip("/")
+    if keycloak_public_url:
+        return f"{keycloak_public_url}/login/index.html"
+
+    return "http://id.local.suranku/login/index.html"
+
 @router.get("/verify-email")
 async def verify_email(
     email: str,
@@ -40,7 +52,7 @@ async def verify_email(
         result = await verification_service.verify_email(db, email, token)
 
         if result["status"] == "verified":
-            base_login_url = os.getenv("PLATFORM_LOGIN_URL", "http://id.local.suranku/login/index.html")
+            base_login_url = _verification_login_url()
             login_url = f"{base_login_url}{'&' if '?' in base_login_url else '?'}verified=true"
             # Return HTML success page with option to go to login
             html_content = """

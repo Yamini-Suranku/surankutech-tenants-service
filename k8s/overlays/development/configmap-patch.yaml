@@ -9,8 +9,8 @@ data:
   platform-frontend-url: "https://platform.suranku.com"
   cors-allow-origins: "https://platform.suranku.com,https://id.suranku.com,https://api.suranku.com,https://home.local.suranku,https://id.local.suranku,https://api.local.suranku"
   keycloak-client-id: "suranku-api"
-  # Development-specific Application Base URL for email links (via Kong Gateway)
-  app-base-url: "http://api.local.suranku"
+  # Public application base URL for verification and password-reset email links
+  app-base-url: "https://api.suranku.com"
   # Cloud-agnostic Storage Configuration (S3-compatible)
   storage-type: "minio"  # Use MinIO for development
   storage-endpoint: "http://suranku-minio.shared-services.svc.cluster.local:9000"  # MinIO endpoint for dev

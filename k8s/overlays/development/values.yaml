@@ -43,8 +43,8 @@ environment:
   # Vault secret file paths
   VAULT_ADMIN_SECRET_FILE_PATH: "/vault/secrets/keycloak-admin"
 
-  # Application Base URL for email links (environment-specific)
-  APP_BASE_URL: "http://tenants.local.suranku"
+  # Public application base URL for email links
+  APP_BASE_URL: "https://api.suranku.com"
 
   # Keycloak configuration
   KEYCLOAK_URL: "http://keycloak.shared-services.svc.cluster.local:8080"
