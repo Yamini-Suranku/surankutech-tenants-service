@@ -42,7 +42,7 @@ spec:
       serviceAccountName: tenant-services-sa
       containers:
       - name: tenants-service
-        image: surankutech/tenants-service:v0.6.82
+        image: surankutech/tenants-service:v0.6.86
         ports:
         - containerPort: 8000
           name: http

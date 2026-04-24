@@ -21,4 +21,4 @@ commonLabels:
 # Images
 images:
 - name: surankutech/tenants-service
-  newTag: v0.6.82
+  newTag: v0.6.86
