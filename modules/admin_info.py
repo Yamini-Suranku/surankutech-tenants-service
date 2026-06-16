@@ -16,6 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 from shared.database import get_db
 from shared.auth import get_current_token_data, TokenData, require_platform_admin_access
 from shared.models import AuditLog, Tenant, TenantAppAccess, User, UserStatus, UserTenant
+from models import Organization, OrganizationAppAccess, TenantLDAPConfig
 from modules.platform_auth_policy import (
     get_platform_auth_settings,
     serialize_platform_auth_settings,
@@ -89,6 +90,104 @@ def _tenant_admin_summary(db: Session, tenant_id: str) -> dict:
         "is_email_verified": user.is_email_verified,
         "membership_status": user_tenant.status,
         "app_roles": user_tenant.app_roles or {},
+    }
+
+
+def _iso(value):
+    return value.isoformat() if value else None
+
+
+def _platform_stats_payload(db: Session) -> dict:
+    tenants = db.query(Tenant).all()
+    organizations = db.query(Organization).filter(Organization.deleted_at.is_(None)).all()
+    ldap_configs = db.query(TenantLDAPConfig).all()
+    org_app_access = db.query(OrganizationAppAccess).all()
+    tenant_app_access = db.query(TenantAppAccess).all()
+    tenant_by_id = {tenant.id: tenant for tenant in tenants}
+    ldap_by_org = {config.organization_id for config in ldap_configs if config.organization_id and config.enabled}
+
+    app_summary = {}
+    for access in org_app_access:
+        summary = app_summary.setdefault(access.app_name, {
+            "app_name": access.app_name,
+            "configured": 0,
+            "enabled": 0,
+            "ready": 0,
+            "pending": 0,
+            "failed": 0,
+        })
+        summary["configured"] += 1
+        if access.is_enabled:
+            summary["enabled"] += 1
+        status = (access.provisioning_state or access.dns_status or "pending").lower()
+        if status in summary:
+            summary[status] += 1
+        elif status == "not_started":
+            summary["pending"] += 1
+
+    if not app_summary:
+        for access in tenant_app_access:
+            summary = app_summary.setdefault(access.app_name, {
+                "app_name": access.app_name,
+                "configured": 0,
+                "enabled": 0,
+                "ready": 0,
+                "pending": 0,
+                "failed": 0,
+            })
+            summary["configured"] += 1
+            if access.is_enabled:
+                summary["enabled"] += 1
+            status = (access.provisioning_state or access.dns_status or "pending").lower()
+            if status in summary:
+                summary[status] += 1
+
+    organization_rows = []
+    dns_rows = []
+    for org in organizations:
+        tenant = tenant_by_id.get(org.tenant_id)
+        apps = [access for access in org_app_access if access.organization_id == org.id]
+        hostname = org.dns_hostname or (
+            f"{org.dns_subdomain}.{org.dns_zone}" if org.dns_subdomain and org.dns_zone else org.dns_subdomain
+        )
+        row = {
+            "id": org.id,
+            "tenant_id": org.tenant_id,
+            "tenant_name": tenant.name if tenant else None,
+            "name": org.name,
+            "slug": org.slug,
+            "status": org.status,
+            "dns_subdomain": org.dns_subdomain,
+            "dns_zone": org.dns_zone,
+            "dns_hostname": hostname,
+            "dns_status": org.dns_status,
+            "app_count": len(apps),
+            "enabled_app_count": len([access for access in apps if access.is_enabled]),
+            "ldap_enabled": org.id in ldap_by_org,
+            "created_at": _iso(org.created_at),
+        }
+        organization_rows.append(row)
+        if hostname:
+            dns_rows.append(row)
+
+    return {
+        "totalUsers": db.query(User).count(),
+        "activeUsers": db.query(User).filter(User.status == UserStatus.ACTIVE).count(),
+        "totalTenants": len(tenants),
+        "activeTenants": len([tenant for tenant in tenants if tenant.is_active]),
+        "totalOrganizations": len(organizations),
+        "ldapConfigs": len(ldap_configs),
+        "enabledLdapConfigs": len([config for config in ldap_configs if config.enabled]),
+        "dnsEntries": len(dns_rows),
+        "organizations": organization_rows,
+        "dns_entries": dns_rows,
+        "applications": sorted(app_summary.values(), key=lambda item: item["app_name"]),
+        "health": {
+            "auth": "healthy",
+            "database": "healthy",
+            "storage": "unknown",
+        },
+        "generated_at": datetime.utcnow().isoformat(),
     }
 
 @router.get("/admin/auth-server-info")
@@ -187,6 +286,15 @@ async def get_admin_platform_auth_settings(
 ):
     _require_platform_admin_or_403(token_data)
     return serialize_platform_auth_settings(get_platform_auth_settings(db))
+
+
+@router.get("/admin/platform/stats")
+async def get_platform_stats(
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db),
+):
+    _require_platform_admin_or_403(token_data)
+    return _platform_stats_payload(db)
 
 
 @router.put("/admin/platform-auth-settings")
