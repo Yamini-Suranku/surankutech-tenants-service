@@ -43,6 +43,7 @@ from modules.provisioning_events import (
     emit_app_enabled_event,
     emit_tenant_created_event,
 )
+from modules.platform_auth_policy import get_platform_auth_settings
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +423,8 @@ async def create_tenant(
     try:
         keycloak_client = KeycloakClient()
         normalized_admin_email = (request.admin_email or "").strip().lower()
+        auth_settings = get_platform_auth_settings(db)
+        tenant_approval_required = bool(auth_settings.tenant_approval_required)
 
         # Create tenant
         tenant_id = str(uuid.uuid4())
@@ -430,10 +433,15 @@ async def create_tenant(
             id=tenant_id,
             name=request.company_name,
             domain=tenant_domain,
-            subscription_status="trial",
+            subscription_status="pending_approval" if tenant_approval_required else "trial",
             plan_id="free",
             trial_started_at=datetime.utcnow(),
-            trial_expires_at=datetime.utcnow() + timedelta(days=14)
+            trial_expires_at=datetime.utcnow() + timedelta(days=14),
+            is_active=not tenant_approval_required,
+            settings={
+                "platform_approval_status": "pending" if tenant_approval_required else "not_required",
+                "platform_approval_required": tenant_approval_required,
+            },
         )
         db.add(tenant)
         db.flush()  # Ensure tenant is written to DB before creating dependent records
@@ -446,20 +454,21 @@ async def create_tenant(
             logger.info(f"Adding existing user {normalized_admin_email} to new tenant {tenant_id}")
             user = existing_user
 
-            # Add existing user to new tenant group in Keycloak
-            keycloak_user_id = await keycloak_client.add_existing_user_to_tenant(
-                user_email=normalized_admin_email,
-                tenant_id=tenant_id,
-                app_roles={
-                    "darkhole": ["admin"],
-                    "darkfolio": ["admin"],
-                    "confiploy": ["admin"]
-                }
-            )
+            if not tenant_approval_required:
+                # Add existing user to new tenant group in Keycloak
+                keycloak_user_id = await keycloak_client.add_existing_user_to_tenant(
+                    user_email=normalized_admin_email,
+                    tenant_id=tenant_id,
+                    app_roles={
+                        "darkhole": ["admin"],
+                        "darkfolio": ["admin"],
+                        "confiploy": ["admin"]
+                    }
+                )
 
-            # Update user's Keycloak ID if not set
-            if not user.keycloak_id:
-                user.keycloak_id = keycloak_user_id
+                # Update user's Keycloak ID if not set
+                if not user.keycloak_id:
+                    user.keycloak_id = keycloak_user_id
 
         else:
             # New user - create invitation instead of requiring password
@@ -507,8 +516,8 @@ async def create_tenant(
 
         if not existing_user_tenant:
             # Set status based on user verification status
-            user_tenant_status = "active" if user.is_email_verified else "pending"
-            user_tenant_joined_at = datetime.utcnow() if user.is_email_verified else None
+            user_tenant_status = "active" if user.is_email_verified and not tenant_approval_required else "pending"
+            user_tenant_joined_at = datetime.utcnow() if user_tenant_status == "active" else None
 
             user_tenant = UserTenant(
                 user_id=user.id,
@@ -530,8 +539,8 @@ async def create_tenant(
                 "darkfolio": ["admin"],
                 "confiploy": ["admin"]
             }
-            existing_user_tenant.status = "active"
-            existing_user_tenant.joined_at = datetime.utcnow()
+            existing_user_tenant.status = "active" if not tenant_approval_required else "pending"
+            existing_user_tenant.joined_at = datetime.utcnow() if existing_user_tenant.status == "active" else None
             logger.info(f"Updated existing user-tenant relationship for {user.email} in tenant {tenant_id}")
 
         created_app_accesses: List[TenantAppAccess] = []
@@ -570,7 +579,11 @@ async def create_tenant(
             action="tenant_created",
             resource_type="tenant",
             resource_id=tenant_id,
-            details={"company_name": request.company_name, "admin_email": request.admin_email}
+            details={
+                "company_name": request.company_name,
+                "admin_email": request.admin_email,
+                "platform_approval_required": tenant_approval_required,
+            }
         )
         db.add(audit_log)
         db.commit()

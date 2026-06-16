@@ -35,6 +35,7 @@ def create_all_tables():
         logger.info("Importing tenants service models...")
         from models import (
             Invitation,
+            PlatformAuthSettings,
             TenantSettings,
             SocialAccount,
             PasswordResetToken,

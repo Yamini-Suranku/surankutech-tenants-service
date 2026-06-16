@@ -11,7 +11,7 @@ import logging
 import os
 
 from shared.database import get_db
-from shared.models import User
+from shared.models import Tenant, TenantAppAccess, User, UserStatus, UserTenant
 from shared.email_verification import EmailVerificationService
 from pydantic import BaseModel, EmailStr
 
@@ -39,6 +39,42 @@ def _verification_login_url() -> str:
 
     return "http://id.local.suranku/login/index.html"
 
+
+def _enforce_platform_approval_after_verification(db: Session, email: str) -> bool:
+    """Keep newly verified tenant signups pending when platform approval is required."""
+    user = db.query(User).filter(func.lower(User.email) == email.strip().lower()).first()
+    if not user:
+        return False
+
+    updated = False
+    user_tenants = db.query(UserTenant).filter(UserTenant.user_id == user.id).all()
+    for user_tenant in user_tenants:
+        tenant = db.query(Tenant).filter(Tenant.id == user_tenant.tenant_id).first()
+        tenant_settings = tenant.settings if tenant and isinstance(tenant.settings, dict) else {}
+        approval_required = (
+            tenant_settings.get("platform_approval_required") is True
+            and tenant_settings.get("platform_approval_status") == "pending"
+        )
+        if not approval_required:
+            continue
+
+        was_active = user_tenant.status == UserStatus.ACTIVE or user_tenant.status == "active"
+        user_tenant.status = UserStatus.PENDING
+        user_tenant.joined_at = None
+        updated = True
+
+        if was_active:
+            app_access_list = db.query(TenantAppAccess).filter(
+                TenantAppAccess.tenant_id == user_tenant.tenant_id
+            ).all()
+            for app_access in app_access_list:
+                app_access.current_users = max((app_access.current_users or 0) - 1, 0)
+
+    if updated:
+        db.commit()
+        logger.info("Email verified for %s; tenant access remains pending platform approval", email)
+    return updated
+
 @router.get("/verify-email")
 async def verify_email(
     email: str,
@@ -52,9 +88,18 @@ async def verify_email(
         result = await verification_service.verify_email(db, email, token)
 
         if result["status"] == "verified":
+            pending_platform_approval = _enforce_platform_approval_after_verification(db, email)
             base_login_url = _verification_login_url()
-            login_url = f"{base_login_url}{'&' if '?' in base_login_url else '?'}verified=true"
+            query = "verified=true"
+            if pending_platform_approval:
+                query += "&pending_approval=true"
+            login_url = f"{base_login_url}{'&' if '?' in base_login_url else '?'}{query}"
             # Return HTML success page with option to go to login
+            message = (
+                "Your email address has been verified successfully. Your tenant is waiting for Platform Admin approval before platform access is enabled."
+                if pending_platform_approval
+                else "Your email address has been verified successfully. You can now login to your account and access all features."
+            )
             html_content = """
             <!DOCTYPE html>
             <html>
@@ -113,12 +158,12 @@ async def verify_email(
                 <div class="container">
                     <div class="success-icon">✓</div>
                     <h1>Email Verified Successfully!</h1>
-                    <p>Your email address has been verified successfully. You can now login to your account and access all features.</p>
+                    <p>{message}</p>
                     <a href="{login_url}" class="login-btn">Go to Login Page</a>
                 </div>
             </body>
             </html>
-            """.format(login_url=login_url)
+            """.format(login_url=login_url, message=message)
             return HTMLResponse(content=html_content, status_code=200)
         else:
             # For error cases, still return JSON for API compatibility
@@ -144,9 +189,11 @@ async def verify_email_post(
         verification_service = EmailVerificationService()
         result = await verification_service.verify_email(db, payload.email, payload.token)
         if result["status"] == "verified":
+            pending_platform_approval = _enforce_platform_approval_after_verification(db, payload.email)
             return {
                 "status": "verified",
-                "message": "Email verified successfully"
+                "message": "Email verified successfully",
+                "pending_platform_approval": pending_platform_approval,
             }
         return result
     except HTTPException:

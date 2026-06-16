@@ -18,6 +18,7 @@ from shared.models import User, UserTenant
 from models import SocialAccount, Organization, TenantLDAPConfig, OrganizationUserRole
 from schemas import SocialLoginRequest, SocialLoginResponse
 from modules.keycloak_client import KeycloakClient
+from modules.platform_auth_policy import get_platform_auth_settings, normalize_social_providers
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,15 @@ async def get_social_providers(
     """Get available social login providers"""
     import os
 
+    auth_settings = get_platform_auth_settings(db)
+    enabled_provider_ids = set(normalize_social_providers(auth_settings.enabled_social_providers))
+    if not auth_settings.social_login_enabled:
+        return {
+            "providers": [],
+            "social_login_enabled": False,
+            "disabled_reason": "Social login is disabled by platform policy"
+        }
+
     # Get Keycloak URL from environment
     keycloak_base_url = os.getenv("KEYCLOAK_PUBLIC_URL", "http://localhost:8080")
     realm = "suranku-platform"
@@ -231,6 +241,7 @@ async def get_social_providers(
             )
         }
     ]
+    providers = [provider for provider in providers if provider["id"] in enabled_provider_ids]
 
     org = None
     if organization_id:
@@ -252,7 +263,7 @@ async def get_social_providers(
             TenantLDAPConfig.enabled == True
         ).first()
 
-        if ldap_config:
+        if ldap_config and "microsoft" in enabled_provider_ids:
             keycloak_client = KeycloakClient()
             org_alias = KeycloakClient.get_org_microsoft_idp_alias(org.id)
             effective_alias = org_alias
@@ -289,7 +300,8 @@ async def get_social_providers(
             )
 
     return {
-        "providers": providers
+        "providers": providers,
+        "social_login_enabled": True,
     }
 
 @router.post("/login", response_model=SocialLoginResponse)
@@ -299,6 +311,11 @@ async def initiate_social_login(
 ):
     """Initiate social login flow"""
     try:
+        auth_settings = get_platform_auth_settings(db)
+        enabled_provider_ids = set(normalize_social_providers(auth_settings.enabled_social_providers))
+        if not auth_settings.social_login_enabled or request.provider not in enabled_provider_ids:
+            raise HTTPException(status_code=403, detail="Social login is disabled by platform policy")
+
         keycloak_client = KeycloakClient()
 
         # Get social provider configuration
@@ -323,6 +340,8 @@ async def initiate_social_login(
             state=state
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Social login initiation error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to initiate social login: {str(e)}")
@@ -336,6 +355,10 @@ async def handle_oauth_callback(
 ):
     """Handle OAuth callback from Keycloak after social login"""
     try:
+        auth_settings = get_platform_auth_settings(db)
+        if not auth_settings.social_login_enabled:
+            raise HTTPException(status_code=403, detail="Social login is disabled by platform policy")
+
         import httpx
         from shared.models import UserStatus
 
