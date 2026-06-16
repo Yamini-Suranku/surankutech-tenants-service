@@ -46,7 +46,20 @@ DEFAULT_TENANT_ADMIN_APP_ROLES = {
 
 def require_platform_admin(token_data: TokenData) -> bool:
     """Check if user has platform admin access"""
-    return require_platform_admin_access(token_data)
+    if require_platform_admin_access(token_data):
+        return True
+
+    groups = {str(group).strip("/").lower() for group in (token_data.groups or [])}
+    if groups.intersection({"platform-admin", "platform-admins", "platform_admin", "admin", "superadmin"}):
+        return True
+
+    resource_access = token_data.resource_access or {}
+    for client in ("platform", "platform-client", "realm-management"):
+        roles = {str(role).lower() for role in resource_access.get(client, {}).get("roles", [])}
+        if roles.intersection({"admin", "platform-admin", "platform-admins", "platform_admin", "manage-users", "manage-realm"}):
+            return True
+
+    return False
 
 
 def _require_platform_admin_or_403(token_data: TokenData) -> None:
