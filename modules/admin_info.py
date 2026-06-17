@@ -105,6 +105,16 @@ def _platform_stats_payload(db: Session) -> dict:
     tenant_app_access = db.query(TenantAppAccess).all()
     tenant_by_id = {tenant.id: tenant for tenant in tenants}
     ldap_by_org = {config.organization_id for config in ldap_configs if config.organization_id and config.enabled}
+    organizations_by_tenant = {}
+    org_app_access_by_tenant = {}
+    tenant_app_access_by_tenant = {}
+
+    for org in organizations:
+        organizations_by_tenant.setdefault(org.tenant_id, []).append(org)
+    for access in org_app_access:
+        org_app_access_by_tenant.setdefault(access.tenant_id, []).append(access)
+    for access in tenant_app_access:
+        tenant_app_access_by_tenant.setdefault(access.tenant_id, []).append(access)
 
     app_summary = {}
     for access in org_app_access:
@@ -170,6 +180,45 @@ def _platform_stats_payload(db: Session) -> dict:
         if hostname:
             dns_rows.append(row)
 
+    tenant_rows = []
+    for tenant in tenants:
+        tenant_orgs = organizations_by_tenant.get(tenant.id, [])
+        tenant_org_access = org_app_access_by_tenant.get(tenant.id, [])
+        tenant_access = tenant_app_access_by_tenant.get(tenant.id, [])
+        tenant_dns_entries = []
+        for org in tenant_orgs:
+            hostname = org.dns_hostname or (
+                f"{org.dns_subdomain}.{org.dns_zone}" if org.dns_subdomain and org.dns_zone else org.dns_subdomain
+            )
+            if hostname:
+                tenant_dns_entries.append({
+                    "organization_id": org.id,
+                    "organization_name": org.name,
+                    "hostname": hostname,
+                    "subdomain": org.dns_subdomain,
+                    "zone": org.dns_zone,
+                    "status": org.dns_status,
+                })
+
+        tenant_rows.append({
+            "id": tenant.id,
+            "name": tenant.name,
+            "domain": tenant.domain,
+            "subscription_status": tenant.subscription_status,
+            "plan_id": tenant.plan_id,
+            "is_active": tenant.is_active,
+            "created_at": _iso(tenant.created_at),
+            "trial_expires_at": _iso(tenant.trial_expires_at),
+            "admin_user": _tenant_admin_summary(db, tenant.id),
+            "settings": tenant.settings or {},
+            "organization_count": len(tenant_orgs),
+            "dns_count": len(tenant_dns_entries),
+            "dns_entries": tenant_dns_entries,
+            "app_count": len(tenant_org_access) or len(tenant_access),
+            "enabled_app_count": len([access for access in tenant_org_access if access.is_enabled])
+                or len([access for access in tenant_access if access.is_enabled]),
+        })
+
     return {
         "totalUsers": db.query(User).count(),
         "activeUsers": db.query(User).filter(User.status == UserStatus.ACTIVE).count(),
@@ -179,6 +228,7 @@ def _platform_stats_payload(db: Session) -> dict:
         "ldapConfigs": len(ldap_configs),
         "enabledLdapConfigs": len([config for config in ldap_configs if config.enabled]),
         "dnsEntries": len(dns_rows),
+        "tenants": sorted(tenant_rows, key=lambda item: item["created_at"] or "", reverse=True),
         "organizations": organization_rows,
         "dns_entries": dns_rows,
         "applications": sorted(app_summary.values(), key=lambda item: item["app_name"]),
