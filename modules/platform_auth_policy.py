@@ -66,9 +66,12 @@ def update_platform_auth_settings(
 
 
 def serialize_platform_auth_settings(settings: PlatformAuthSettings) -> dict:
+    signup_approval_required = bool(settings.tenant_approval_required)
     return {
         "social_login_enabled": bool(settings.social_login_enabled),
-        "tenant_approval_required": bool(settings.tenant_approval_required),
+        # Keep the legacy field until the DB column can be renamed safely.
+        "tenant_approval_required": signup_approval_required,
+        "platform_signup_approval_required": signup_approval_required,
         "enabled_social_providers": normalize_social_providers(settings.enabled_social_providers),
         "updated_by": settings.updated_by,
         "updated_at": settings.updated_at.isoformat() if settings.updated_at else None,

@@ -94,6 +94,31 @@ def _raise_if_user_has_blocked_tenant_access(db: Session, user: User) -> None:
         }
     raise HTTPException(status_code=403, detail=detail)
 
+
+def _raise_if_user_has_blocked_platform_access(user: User) -> None:
+    status = str(user.status.value if hasattr(user.status, "value") else user.status or "").lower()
+    if status == UserStatus.SUSPENDED.value:
+        raise HTTPException(status_code=403, detail={
+            "code": "platform_approval_rejected",
+            "message": "Your platform signup was not approved. Contact Suranku Platform support for assistance.",
+            "user_id": user.id,
+            "email": user.email,
+        })
+    if status == UserStatus.PENDING.value:
+        if user.is_email_verified:
+            raise HTTPException(status_code=403, detail={
+                "code": "platform_approval_pending",
+                "message": "Your email is verified. Your platform access is waiting for Platform Admin approval.",
+                "user_id": user.id,
+                "email": user.email,
+            })
+        raise HTTPException(status_code=403, detail={
+            "code": "email_verification_required",
+            "message": "Please verify your email address before signing in.",
+            "user_id": user.id,
+            "email": user.email,
+        })
+
 class UserRegisterRequest(BaseModel):
     email: str
     password: str
@@ -205,6 +230,8 @@ async def login_user(
         user = db.query(User).filter(func.lower(User.email) == normalized_email).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+
+        _raise_if_user_has_blocked_platform_access(user)
 
         # Get all user's active tenant relationships
         user_tenants = db.query(UserTenant).filter(
@@ -330,6 +357,8 @@ async def get_current_user(
         user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+
+        _raise_if_user_has_blocked_platform_access(user)
 
         # Get all user's active tenant relationships
         user_tenants = db.query(UserTenant).filter(

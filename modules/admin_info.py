@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 class PlatformAuthSettingsUpdate(BaseModel):
     social_login_enabled: Optional[bool] = None
     tenant_approval_required: Optional[bool] = None
+    platform_signup_approval_required: Optional[bool] = None
     enabled_social_providers: Optional[List[str]] = Field(default=None)
 
 
@@ -43,8 +44,6 @@ DEFAULT_TENANT_ADMIN_APP_ROLES = {
     "darkfolio": ["admin"],
     "confiploy": ["admin"],
 }
-
-
 def require_platform_admin(token_data: TokenData) -> bool:
     """Check if user has platform admin access"""
     if require_platform_admin_access(token_data):
@@ -90,6 +89,32 @@ def _tenant_admin_summary(db: Session, tenant_id: str) -> dict:
         "is_email_verified": user.is_email_verified,
         "membership_status": user_tenant.status,
         "app_roles": user_tenant.app_roles or {},
+    }
+
+
+def _user_has_active_tenant_membership(db: Session, user_id: str) -> bool:
+    return db.query(UserTenant).filter(
+        UserTenant.user_id == user_id,
+        UserTenant.status == UserStatus.ACTIVE,
+    ).first() is not None
+
+
+def _platform_signup_user_summary(db: Session, user: User) -> dict:
+    memberships = db.query(UserTenant).filter(UserTenant.user_id == user.id).all()
+    return {
+        "id": user.id,
+        "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "status": user.status.value if hasattr(user.status, "value") else user.status,
+        "is_email_verified": user.is_email_verified,
+        "created_at": _iso(user.created_at),
+        "updated_at": _iso(user.updated_at),
+        "membership_count": len(memberships),
+        "has_active_tenant_membership": any(
+            membership.status == UserStatus.ACTIVE or membership.status == "active"
+            for membership in memberships
+        ),
     }
 
 
@@ -354,14 +379,96 @@ async def put_admin_platform_auth_settings(
     db: Session = Depends(get_db),
 ):
     _require_platform_admin_or_403(token_data)
+    signup_approval_required = (
+        request.platform_signup_approval_required
+        if request.platform_signup_approval_required is not None
+        else request.tenant_approval_required
+    )
     settings = update_platform_auth_settings(
         db,
         social_login_enabled=request.social_login_enabled,
-        tenant_approval_required=request.tenant_approval_required,
+        tenant_approval_required=signup_approval_required,
         enabled_social_providers=request.enabled_social_providers,
         updated_by=_admin_identity(token_data),
     )
     return serialize_platform_auth_settings(settings)
+
+
+@router.get("/admin/pending-platform-signups")
+async def list_pending_platform_signups(
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db),
+):
+    _require_platform_admin_or_403(token_data)
+    users = db.query(User).filter(
+        User.status == UserStatus.PENDING,
+        User.is_email_verified.is_(True),
+    ).order_by(User.created_at.desc()).all()
+    items = [
+        _platform_signup_user_summary(db, user)
+        for user in users
+        if not _user_has_active_tenant_membership(db, user.id)
+    ]
+    return {"items": items}
+
+
+@router.post("/admin/pending-platform-signups/{user_id}/approve")
+async def approve_pending_platform_signup(
+    user_id: str,
+    request: TenantApprovalRequest | None = None,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db),
+):
+    _require_platform_admin_or_403(token_data)
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if _user_has_active_tenant_membership(db, user.id):
+        raise HTTPException(status_code=400, detail="User already has active tenant access")
+    if not user.is_email_verified:
+        raise HTTPException(status_code=400, detail="User must verify email before platform approval")
+
+    user.status = UserStatus.ACTIVE
+    if user.keycloak_id:
+        try:
+            keycloak_client = KeycloakClient()
+            await keycloak_client.activate_user_after_verification(user.keycloak_id)
+        except Exception as exc:
+            db.rollback()
+            logger.error("Failed to activate approved platform signup %s in Keycloak: %s", user.id, exc)
+            raise HTTPException(status_code=502, detail="Platform signup approval failed while activating auth access")
+
+    db.commit()
+    logger.info(
+        "Platform signup approved for user %s by %s",
+        user.id,
+        _admin_identity(token_data),
+    )
+    return {"status": "approved", "user_id": user.id}
+
+
+@router.post("/admin/pending-platform-signups/{user_id}/reject")
+async def reject_pending_platform_signup(
+    user_id: str,
+    request: TenantApprovalRequest | None = None,
+    token_data: TokenData = Depends(get_current_token_data),
+    db: Session = Depends(get_db),
+):
+    _require_platform_admin_or_403(token_data)
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if _user_has_active_tenant_membership(db, user.id):
+        raise HTTPException(status_code=400, detail="User already has active tenant access")
+
+    user.status = UserStatus.SUSPENDED
+    db.commit()
+    logger.info(
+        "Platform signup rejected for user %s by %s",
+        user.id,
+        _admin_identity(token_data),
+    )
+    return {"status": "rejected", "user_id": user.id}
 
 
 @router.get("/admin/pending-tenants")

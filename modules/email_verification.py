@@ -13,6 +13,7 @@ import os
 from shared.database import get_db
 from shared.models import Tenant, TenantAppAccess, User, UserStatus, UserTenant
 from shared.email_verification import EmailVerificationService
+from modules.platform_auth_policy import get_platform_auth_settings
 from pydantic import BaseModel, EmailStr
 
 logger = logging.getLogger(__name__)
@@ -41,13 +42,37 @@ def _verification_login_url() -> str:
 
 
 def _enforce_platform_approval_after_verification(db: Session, email: str) -> bool:
-    """Keep newly verified tenant signups pending when platform approval is required."""
+    """Keep newly verified platform or tenant signups pending when approval is required."""
     user = db.query(User).filter(func.lower(User.email) == email.strip().lower()).first()
     if not user:
         return False
 
     updated = False
+    auth_settings = get_platform_auth_settings(db)
     user_tenants = db.query(UserTenant).filter(UserTenant.user_id == user.id).all()
+    if auth_settings.tenant_approval_required:
+        has_active_membership_before_enforcement = any(
+            user_tenant.status == UserStatus.ACTIVE or user_tenant.status == "active"
+            for user_tenant in user_tenants
+        )
+        user.status = UserStatus.PENDING
+        updated = True
+
+        # The shared verifier may auto-create a default platform tenant. Keep that
+        # membership pending; org-invited users are approved by their org admin path.
+        for user_tenant in user_tenants:
+            if user_tenant.status == UserStatus.ACTIVE or user_tenant.status == "active":
+                user_tenant.status = UserStatus.PENDING
+                user_tenant.joined_at = None
+
+        if has_active_membership_before_enforcement:
+            for user_tenant in user_tenants:
+                app_access_list = db.query(TenantAppAccess).filter(
+                    TenantAppAccess.tenant_id == user_tenant.tenant_id
+                ).all()
+                for app_access in app_access_list:
+                    app_access.current_users = max((app_access.current_users or 0) - 1, 0)
+
     for user_tenant in user_tenants:
         tenant = db.query(Tenant).filter(Tenant.id == user_tenant.tenant_id).first()
         tenant_settings = tenant.settings if tenant and isinstance(tenant.settings, dict) else {}
@@ -72,7 +97,7 @@ def _enforce_platform_approval_after_verification(db: Session, email: str) -> bo
 
     if updated:
         db.commit()
-        logger.info("Email verified for %s; tenant access remains pending platform approval", email)
+        logger.info("Email verified for %s; access remains pending platform approval", email)
     return updated
 
 @router.get("/verify-email")
@@ -96,7 +121,7 @@ async def verify_email(
             login_url = f"{base_login_url}{'&' if '?' in base_login_url else '?'}{query}"
             # Return HTML success page with option to go to login
             message = (
-                "Your email address has been verified successfully. Your tenant is waiting for Platform Admin approval before platform access is enabled."
+                "Your email address has been verified successfully. Your platform access is waiting for Platform Admin approval."
                 if pending_platform_approval
                 else "Your email address has been verified successfully. You can now login to your account and access all features."
             )
@@ -192,7 +217,11 @@ async def verify_email_post(
             pending_platform_approval = _enforce_platform_approval_after_verification(db, payload.email)
             return {
                 "status": "verified",
-                "message": "Email verified successfully",
+                "message": (
+                    "Email verified successfully. Platform access is waiting for Platform Admin approval."
+                    if pending_platform_approval
+                    else "Email verified successfully"
+                ),
                 "pending_platform_approval": pending_platform_approval,
             }
         return result
