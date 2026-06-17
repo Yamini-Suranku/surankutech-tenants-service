@@ -44,6 +44,56 @@ def _safe_name(value: str | None, fallback: str = "") -> str:
 def _normalize_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
+
+def _tenant_platform_approval_status(tenant: Tenant | None) -> str | None:
+    if not tenant:
+        return None
+    settings = tenant.settings if isinstance(tenant.settings, dict) else {}
+    approval_status = str(settings.get("platform_approval_status") or "").strip().lower()
+    if tenant.subscription_status == "pending_approval" or approval_status == "pending":
+        return "pending"
+    if tenant.subscription_status == "rejected" or approval_status == "rejected":
+        return "rejected"
+    return None
+
+
+def _raise_if_user_has_blocked_tenant_access(db: Session, user: User) -> None:
+    """Prevent pending/rejected tenant signups from entering as generic platform users."""
+    user_tenants = db.query(UserTenant).filter(UserTenant.user_id == user.id).all()
+    if not user_tenants:
+        return
+
+    blocked_tenants = []
+    for user_tenant in user_tenants:
+        tenant = db.query(Tenant).filter(Tenant.id == user_tenant.tenant_id).first()
+        status = _tenant_platform_approval_status(tenant)
+        if status:
+            blocked_tenants.append((tenant, status))
+
+    if not blocked_tenants:
+        return
+
+    has_active_tenant = any(str(user_tenant.status).lower() == "active" for user_tenant in user_tenants)
+    if has_active_tenant:
+        return
+
+    tenant, status = blocked_tenants[0]
+    if status == "rejected":
+        detail = {
+            "code": "tenant_approval_rejected",
+            "message": "Your tenant signup was not approved. Contact Suranku Platform support for assistance.",
+            "tenant_id": tenant.id if tenant else None,
+            "tenant_name": tenant.name if tenant else None,
+        }
+    else:
+        detail = {
+            "code": "tenant_approval_pending",
+            "message": "Your email is verified. Your tenant is waiting for Platform Admin approval.",
+            "tenant_id": tenant.id if tenant else None,
+            "tenant_name": tenant.name if tenant else None,
+        }
+    raise HTTPException(status_code=403, detail=detail)
+
 class UserRegisterRequest(BaseModel):
     email: str
     password: str
@@ -164,6 +214,7 @@ async def login_user(
 
         # Allow platform users without tenants to login (they can create orgs from admin center)
         if not user_tenants:
+            _raise_if_user_has_blocked_tenant_access(db, user)
             # Return minimal response for platform users without tenants
             user_response = UserResponse(
                 id=user.id,
@@ -288,6 +339,7 @@ async def get_current_user(
 
         # Allow platform users without tenants (they can create orgs from admin center)
         if not user_tenants:
+            _raise_if_user_has_blocked_tenant_access(db, user)
             # Return minimal response for platform users without tenants
             user_response = UserResponse(
                 id=user.id,
