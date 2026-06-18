@@ -13,7 +13,7 @@ from pydantic import BaseModel, EmailStr
 
 from shared.database import get_db
 from sqlalchemy import func
-from shared.auth import verify_token, TokenData, get_current_token_data
+from shared.auth import verify_token, TokenData, get_current_token_data, require_platform_admin_access
 from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
 from shared.email_verification import EmailVerificationService
 from models import TenantSettings, SocialAccount, PasswordResetToken
@@ -124,6 +124,7 @@ def _find_user_for_token(db: Session, token_data: TokenData) -> User | None:
     user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
     if user:
         return user
+    normalized_candidates = []
     candidates = [
         getattr(token_data, "email", None),
         getattr(token_data, "preferred_username", None),
@@ -133,6 +134,7 @@ def _find_user_for_token(db: Session, token_data: TokenData) -> User | None:
         email = _normalize_email(candidate)
         if not email or "@" not in email:
             continue
+        normalized_candidates.append(email)
         user = db.query(User).filter(func.lower(User.email) == email).first()
         if user and token_data.sub and user.keycloak_id != token_data.sub:
             logger.info("Updating stale Keycloak ID for user %s after token identity match", user.email)
@@ -141,6 +143,21 @@ def _find_user_for_token(db: Session, token_data: TokenData) -> User | None:
             db.refresh(user)
         if user:
             return user
+    if normalized_candidates and require_platform_admin_access(token_data):
+        email = normalized_candidates[0]
+        logger.info("Creating local platform admin user record for %s from verified platform-admin token", email)
+        user = User(
+            email=email,
+            first_name=getattr(token_data, "name", None) or "Platform",
+            last_name="Admin",
+            status=UserStatus.ACTIVE,
+            is_email_verified=True,
+            keycloak_id=token_data.sub,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
     logger.warning(
         "Token user could not be mapped to a local user: sub=%s email=%s preferred_username=%s",
         getattr(token_data, "sub", None),
