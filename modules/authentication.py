@@ -119,6 +119,23 @@ def _raise_if_user_has_blocked_platform_access(user: User) -> None:
             "email": user.email,
         })
 
+
+def _find_user_for_token(db: Session, token_data: TokenData) -> User | None:
+    user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
+    if user:
+        return user
+    email = _normalize_email(getattr(token_data, "email", None))
+    if not email:
+        return None
+    user = db.query(User).filter(func.lower(User.email) == email).first()
+    if user and token_data.sub and user.keycloak_id != token_data.sub:
+        logger.info("Updating stale Keycloak ID for user %s after email token match", user.email)
+        user.keycloak_id = token_data.sub
+        db.commit()
+        db.refresh(user)
+    return user
+
+
 class UserRegisterRequest(BaseModel):
     email: str
     password: str
@@ -353,8 +370,8 @@ async def get_current_user(
 ):
     """Get current authenticated user info with all tenants"""
     try:
-        # Find user in database using Keycloak ID from token
-        user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
+        # Find user in database using Keycloak ID, falling back to verified token email.
+        user = _find_user_for_token(db, token_data)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
