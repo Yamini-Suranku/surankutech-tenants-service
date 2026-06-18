@@ -124,16 +124,30 @@ def _find_user_for_token(db: Session, token_data: TokenData) -> User | None:
     user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
     if user:
         return user
-    email = _normalize_email(getattr(token_data, "email", None))
-    if not email:
-        return None
-    user = db.query(User).filter(func.lower(User.email) == email).first()
-    if user and token_data.sub and user.keycloak_id != token_data.sub:
-        logger.info("Updating stale Keycloak ID for user %s after email token match", user.email)
-        user.keycloak_id = token_data.sub
-        db.commit()
-        db.refresh(user)
-    return user
+    candidates = [
+        getattr(token_data, "email", None),
+        getattr(token_data, "preferred_username", None),
+        getattr(token_data, "name", None),
+    ]
+    for candidate in candidates:
+        email = _normalize_email(candidate)
+        if not email or "@" not in email:
+            continue
+        user = db.query(User).filter(func.lower(User.email) == email).first()
+        if user and token_data.sub and user.keycloak_id != token_data.sub:
+            logger.info("Updating stale Keycloak ID for user %s after token identity match", user.email)
+            user.keycloak_id = token_data.sub
+            db.commit()
+            db.refresh(user)
+        if user:
+            return user
+    logger.warning(
+        "Token user could not be mapped to a local user: sub=%s email=%s preferred_username=%s",
+        getattr(token_data, "sub", None),
+        getattr(token_data, "email", None),
+        getattr(token_data, "preferred_username", None),
+    )
+    return None
 
 
 class UserRegisterRequest(BaseModel):
