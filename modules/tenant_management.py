@@ -18,6 +18,7 @@ from shared.auth import verify_token, require_tenant_access, TokenData, get_curr
 from shared.models import (
     Tenant,
     User,
+    UserStatus,
     UserTenant,
     TenantAppAccess,
     AuditLog,
@@ -315,6 +316,28 @@ def get_or_create_user_from_token(db: Session, token_data: TokenData) -> User:
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found in tenant service")
+    status = str(user.status.value if hasattr(user.status, "value") else user.status or "").lower()
+    if status == UserStatus.SUSPENDED.value:
+        raise HTTPException(status_code=403, detail={
+            "code": "platform_approval_rejected",
+            "message": "Your platform signup was not approved. Contact Suranku Platform support for assistance.",
+            "user_id": user.id,
+            "email": user.email,
+        })
+    if status == UserStatus.PENDING.value:
+        if user.is_email_verified:
+            raise HTTPException(status_code=403, detail={
+                "code": "platform_approval_pending",
+                "message": "Your email is verified. Your platform access is waiting for Platform Admin approval.",
+                "user_id": user.id,
+                "email": user.email,
+            })
+        raise HTTPException(status_code=403, detail={
+            "code": "email_verification_required",
+            "message": "Please verify your email address before signing in.",
+            "user_id": user.id,
+            "email": user.email,
+        })
     return user
 
 
