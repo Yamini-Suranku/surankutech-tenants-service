@@ -110,6 +110,17 @@ class TenantSettings(Base):
         Index('idx_tenant_settings_tenant_id', 'tenant_id'),
     )
 
+class PlatformAuthSettings(Base):
+    __tablename__ = "platform_auth_settings"
+
+    id = Column(String(36), primary_key=True, default="default")
+    social_login_enabled = Column(Boolean, default=True, nullable=False)
+    tenant_approval_required = Column(Boolean, default=False, nullable=False)
+    enabled_social_providers = Column(JSON, default=lambda: ["google", "github", "microsoft"], nullable=False)
+    updated_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class SocialAccount(Base):
     __tablename__ = "social_accounts"
 

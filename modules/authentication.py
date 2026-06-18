@@ -13,7 +13,7 @@ from pydantic import BaseModel, EmailStr
 
 from shared.database import get_db
 from sqlalchemy import func
-from shared.auth import verify_token, TokenData, get_current_token_data
+from shared.auth import verify_token, TokenData, get_current_token_data, require_platform_admin_access
 from shared.models import Tenant, User, UserTenant, TenantAppAccess, AuditLog, UserStatus
 from shared.email_verification import EmailVerificationService
 from models import TenantSettings, SocialAccount, PasswordResetToken
@@ -43,6 +43,129 @@ def _safe_name(value: str | None, fallback: str = "") -> str:
 
 def _normalize_email(value: str | None) -> str:
     return (value or "").strip().lower()
+
+
+def _tenant_platform_approval_status(tenant: Tenant | None) -> str | None:
+    if not tenant:
+        return None
+    settings = tenant.settings if isinstance(tenant.settings, dict) else {}
+    approval_status = str(settings.get("platform_approval_status") or "").strip().lower()
+    if tenant.subscription_status == "pending_approval" or approval_status == "pending":
+        return "pending"
+    if tenant.subscription_status == "rejected" or approval_status == "rejected":
+        return "rejected"
+    return None
+
+
+def _raise_if_user_has_blocked_tenant_access(db: Session, user: User) -> None:
+    """Prevent pending/rejected tenant signups from entering as generic platform users."""
+    user_tenants = db.query(UserTenant).filter(UserTenant.user_id == user.id).all()
+    if not user_tenants:
+        return
+
+    blocked_tenants = []
+    for user_tenant in user_tenants:
+        tenant = db.query(Tenant).filter(Tenant.id == user_tenant.tenant_id).first()
+        status = _tenant_platform_approval_status(tenant)
+        if status:
+            blocked_tenants.append((tenant, status))
+
+    if not blocked_tenants:
+        return
+
+    has_active_tenant = any(str(user_tenant.status).lower() == "active" for user_tenant in user_tenants)
+    if has_active_tenant:
+        return
+
+    tenant, status = blocked_tenants[0]
+    if status == "rejected":
+        detail = {
+            "code": "tenant_approval_rejected",
+            "message": "Your tenant signup was not approved. Contact Suranku Platform support for assistance.",
+            "tenant_id": tenant.id if tenant else None,
+            "tenant_name": tenant.name if tenant else None,
+        }
+    else:
+        detail = {
+            "code": "tenant_approval_pending",
+            "message": "Your email is verified. Your tenant is waiting for Platform Admin approval.",
+            "tenant_id": tenant.id if tenant else None,
+            "tenant_name": tenant.name if tenant else None,
+        }
+    raise HTTPException(status_code=403, detail=detail)
+
+
+def _raise_if_user_has_blocked_platform_access(user: User) -> None:
+    status = str(user.status.value if hasattr(user.status, "value") else user.status or "").lower()
+    if status == UserStatus.SUSPENDED.value:
+        raise HTTPException(status_code=403, detail={
+            "code": "platform_approval_rejected",
+            "message": "Your platform signup was not approved. Contact Suranku Platform support for assistance.",
+            "user_id": user.id,
+            "email": user.email,
+        })
+    if status == UserStatus.PENDING.value:
+        if user.is_email_verified:
+            raise HTTPException(status_code=403, detail={
+                "code": "platform_approval_pending",
+                "message": "Your email is verified. Your platform access is waiting for Platform Admin approval.",
+                "user_id": user.id,
+                "email": user.email,
+            })
+        raise HTTPException(status_code=403, detail={
+            "code": "email_verification_required",
+            "message": "Please verify your email address before signing in.",
+            "user_id": user.id,
+            "email": user.email,
+        })
+
+
+def _find_user_for_token(db: Session, token_data: TokenData) -> User | None:
+    user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
+    if user:
+        return user
+    normalized_candidates = []
+    candidates = [
+        getattr(token_data, "email", None),
+        getattr(token_data, "preferred_username", None),
+        getattr(token_data, "name", None),
+    ]
+    for candidate in candidates:
+        email = _normalize_email(candidate)
+        if not email or "@" not in email:
+            continue
+        normalized_candidates.append(email)
+        user = db.query(User).filter(func.lower(User.email) == email).first()
+        if user and token_data.sub and user.keycloak_id != token_data.sub:
+            logger.info("Updating stale Keycloak ID for user %s after token identity match", user.email)
+            user.keycloak_id = token_data.sub
+            db.commit()
+            db.refresh(user)
+        if user:
+            return user
+    if normalized_candidates and require_platform_admin_access(token_data):
+        email = normalized_candidates[0]
+        logger.info("Creating local platform admin user record for %s from verified platform-admin token", email)
+        user = User(
+            email=email,
+            first_name=getattr(token_data, "name", None) or "Platform",
+            last_name="Admin",
+            status=UserStatus.ACTIVE,
+            is_email_verified=True,
+            keycloak_id=token_data.sub,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+    logger.warning(
+        "Token user could not be mapped to a local user: sub=%s email=%s preferred_username=%s",
+        getattr(token_data, "sub", None),
+        getattr(token_data, "email", None),
+        getattr(token_data, "preferred_username", None),
+    )
+    return None
+
 
 class UserRegisterRequest(BaseModel):
     email: str
@@ -156,6 +279,8 @@ async def login_user(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
+        _raise_if_user_has_blocked_platform_access(user)
+
         # Get all user's active tenant relationships
         user_tenants = db.query(UserTenant).filter(
             UserTenant.user_id == user.id,
@@ -164,6 +289,7 @@ async def login_user(
 
         # Allow platform users without tenants to login (they can create orgs from admin center)
         if not user_tenants:
+            _raise_if_user_has_blocked_tenant_access(db, user)
             # Return minimal response for platform users without tenants
             user_response = UserResponse(
                 id=user.id,
@@ -275,10 +401,12 @@ async def get_current_user(
 ):
     """Get current authenticated user info with all tenants"""
     try:
-        # Find user in database using Keycloak ID from token
-        user = db.query(User).filter(User.keycloak_id == token_data.sub).first()
+        # Find user in database using Keycloak ID, falling back to verified token email.
+        user = _find_user_for_token(db, token_data)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+
+        _raise_if_user_has_blocked_platform_access(user)
 
         # Get all user's active tenant relationships
         user_tenants = db.query(UserTenant).filter(
@@ -288,6 +416,7 @@ async def get_current_user(
 
         # Allow platform users without tenants (they can create orgs from admin center)
         if not user_tenants:
+            _raise_if_user_has_blocked_tenant_access(db, user)
             # Return minimal response for platform users without tenants
             user_response = UserResponse(
                 id=user.id,
